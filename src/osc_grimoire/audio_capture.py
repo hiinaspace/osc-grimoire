@@ -106,7 +106,7 @@ class PushToTalkRecorder:
         indata: np.ndarray,
         _frames: int,
         _time_info: object,
-        status: sd.CallbackFlags,
+        status: object,
     ) -> None:
         if status:
             LOGGER.debug("sounddevice status: %s", status)
@@ -139,3 +139,96 @@ class PushToTalkRecorder:
         self._release_event.set()
         if self._on_state_change is not None:
             self._on_state_change(False)
+
+
+class NonBlockingAudioRecorder:
+    def __init__(
+        self,
+        audio_config: AudioConfig,
+        on_state_change: Callable[[bool], None] | None = None,
+        stream_factory: Callable[..., sd.InputStream] | None = None,
+    ) -> None:
+        self._audio_config = audio_config
+        self._on_state_change = on_state_change
+        self._stream_factory = stream_factory or sd.InputStream
+        self._lock = threading.Lock()
+        self._buffer: list[FloatArray] = []
+        self._recording = False
+        self._stream: sd.InputStream | None = None
+
+    def __enter__(self) -> Self:
+        self.start_stream()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.stop_stream()
+
+    @property
+    def is_recording(self) -> bool:
+        with self._lock:
+            return self._recording
+
+    def start_stream(self) -> None:
+        if self._stream is not None:
+            return
+        self._stream = self._stream_factory(
+            samplerate=self._audio_config.sample_rate,
+            channels=self._audio_config.channels,
+            dtype="float32",
+            device=self._audio_config.input_device,
+            callback=self._audio_callback,
+        )
+        self._stream.start()
+
+    def stop_stream(self) -> None:
+        if self._stream is None:
+            return
+        if self.is_recording:
+            self.end_recording()
+        self._stream.stop()
+        self._stream.close()
+        self._stream = None
+
+    def begin_recording(self) -> None:
+        with self._lock:
+            if self._recording:
+                return
+            self._buffer.clear()
+            self._recording = True
+        if self._on_state_change is not None:
+            self._on_state_change(True)
+
+    def end_recording(self) -> FloatArray:
+        with self._lock:
+            if not self._recording:
+                return np.zeros(0, dtype=np.float32)
+            self._recording = False
+            chunks = list(self._buffer)
+            self._buffer.clear()
+        if self._on_state_change is not None:
+            self._on_state_change(False)
+        if not chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(chunks).astype(np.float32)
+
+    def _audio_callback(
+        self,
+        indata: np.ndarray,
+        _frames: int,
+        _time_info: object,
+        status: object,
+    ) -> None:
+        if status:
+            LOGGER.debug("sounddevice status: %s", status)
+        with self._lock:
+            if not self._recording:
+                return
+            if indata.shape[1] == 1:
+                self._buffer.append(indata[:, 0].copy())
+            else:
+                self._buffer.append(indata.mean(axis=1).astype(np.float32).copy())

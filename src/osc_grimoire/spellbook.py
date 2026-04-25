@@ -105,6 +105,20 @@ def add_voice_sample(
     return replace_spell(spellbook, updated)
 
 
+def remove_voice_sample(
+    spellbook: Spellbook, spell: Spell, relative_path: str
+) -> Spellbook:
+    current = find_spell_by_id(spellbook, spell.id)
+    if current is None:
+        raise ValueError(f"Spell {spell.id!r} not in spellbook")
+    updated = replace(
+        current,
+        voice_samples=tuple(p for p in current.voice_samples if p != relative_path),
+        intra_class_median=None,
+    )
+    return replace_spell(spellbook, updated)
+
+
 def voice_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
     return [spellbook.data_dir / rel for rel in spell.voice_samples]
 

@@ -16,10 +16,16 @@ dependencies = [
     "dtaidistance>=2.3.13",
     "keyboard>=0.13.5",
     "platformdirs>=4.5.0",
+    "torch>=2.9.0",
+    "transformers>=4.57.0",
+    "matplotlib>=3.10.0",
+    "psutil>=7.0.0",
+    "imgui-bundle[glfw]>=1.92.0",
 ]
 
 [project.scripts]
 osc-grimoire = "osc_grimoire:main"
+osc-grimoire-ui = "osc_grimoire.desktop_ui:main"
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]
@@ -30,12 +36,6 @@ dev = [
     "pytest>=8.4.0",
     "ruff>=0.15.0",
     "ty>=0.0.1a22",
-]
-ml = [
-    "matplotlib>=3.10.0",
-    "psutil>=7.0.0",
-    "torch>=2.9.0",
-    "transformers>=4.57.0",
 ]
 oww = [
     "onnxruntime>=1.23.0",
