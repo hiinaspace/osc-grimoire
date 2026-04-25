@@ -33,6 +33,16 @@ class VoiceRecognitionConfig:
 
 
 @dataclass(frozen=True)
+class GestureRecognitionConfig:
+    sample_spacing_m: float = 0.01
+    min_points: int = 8
+    point_count: int = 32
+    score_min: float = 0.20
+    margin_min: float = 0.03
+    duplicate_distance: float = 0.0
+
+
+@dataclass(frozen=True)
 class OpenVrOverlayConfig:
     overlay_hand: str = "left"
     pointer_hand: str = "right"
@@ -48,6 +58,7 @@ class OpenVrOverlayConfig:
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     voice: VoiceRecognitionConfig = field(default_factory=VoiceRecognitionConfig)
+    gesture: GestureRecognitionConfig = field(default_factory=GestureRecognitionConfig)
     openvr: OpenVrOverlayConfig = field(default_factory=OpenVrOverlayConfig)
     hotkey: str = "space"
     default_samples_per_spell: int = 5

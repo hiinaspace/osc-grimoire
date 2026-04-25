@@ -15,6 +15,7 @@ import numpy as np
 from .config import OpenVrOverlayConfig
 from .desktop_controller import VoiceTrainingController
 from .desktop_ui import DesktopVoiceUi
+from .gesture_capture import GestureStrokeSampler
 from .paths import default_data_dir
 
 LOGGER = logging.getLogger(__name__)
@@ -45,6 +46,10 @@ def uv_to_imgui(
 
 def is_trigger_pressed(button_mask: int, trigger_button_id: int = 33) -> bool:
     return bool(button_mask & (1 << trigger_button_id))
+
+
+def is_button_pressed(button_mask: int, button_id: int) -> bool:
+    return bool(button_mask & (1 << button_id))
 
 
 def next_mouse_events(
@@ -152,6 +157,8 @@ class OpenVrOverlayRunner:
         self.vr_overlay: Any = None
         self.overlay_handle: int | None = None
         self.mouse_state = OverlayMouseState()
+        self.gesture_sampler = GestureStrokeSampler(app.controller.config.gesture)
+        self.grip_down = False
         self._shutdown_openvr = False
 
     def run(self) -> None:
@@ -256,6 +263,12 @@ class OpenVrOverlayRunner:
                 int(self.openvr.k_EButton_SteamVR_Trigger),
             )
         )
+        grip_down = bool(
+            state_ok
+            and is_button_pressed(
+                int(controller_state.ulButtonPressed), int(self.openvr.k_EButton_Grip)
+            )
+        )
         poses = self._tracked_device_poses()
         if poses is None:
             self.app.controller.status = "Waiting for controller tracking..."
@@ -268,7 +281,9 @@ class OpenVrOverlayRunner:
             self._apply_mouse_events(
                 hovering=False, trigger_down=trigger_down, position=None
             )
+            self._update_gesture_capture(False, poses, device_index)
             return
+        self._update_gesture_capture(grip_down, poses, device_index)
         ray = ray_from_pose(pose)
         intersection = self._compute_intersection(ray)
         if intersection is None:
@@ -281,6 +296,35 @@ class OpenVrOverlayRunner:
             trigger_down=trigger_down,
             position=intersection,
         )
+
+    def _update_gesture_capture(
+        self, grip_down: bool, poses: Any, pointer_device_index: int
+    ) -> None:
+        assert self.openvr is not None
+        hmd_pose = poses[self.openvr.k_unTrackedDeviceIndex_Hmd]
+        pointer_pose = poses[pointer_device_index]
+        if grip_down and not self.grip_down:
+            if not hmd_pose.bPoseIsValid or not pointer_pose.bPoseIsValid:
+                self.app.controller.status = "Waiting for gesture tracking..."
+                self.grip_down = grip_down
+                return
+            self.gesture_sampler.begin(hmd_pose.mDeviceToAbsoluteTracking)
+            self.gesture_sampler.add_controller_pose(
+                pointer_pose.mDeviceToAbsoluteTracking
+            )
+            self.app.controller.status = "Recording gesture..."
+        elif grip_down and self.gesture_sampler.active and pointer_pose.bPoseIsValid:
+            self.gesture_sampler.add_controller_pose(
+                pointer_pose.mDeviceToAbsoluteTracking
+            )
+        elif not grip_down and self.grip_down:
+            points = self.gesture_sampler.finish()
+            try:
+                self.app.controller.handle_gesture_stroke(points)
+            except Exception as exc:
+                LOGGER.exception("Gesture action failed")
+                self.app.controller.status = str(exc)
+        self.grip_down = grip_down
 
     def _apply_mouse_events(
         self,

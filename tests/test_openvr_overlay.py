@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
-from osc_grimoire.config import OpenVrOverlayConfig
+from osc_grimoire.config import GestureRecognitionConfig, OpenVrOverlayConfig
 from osc_grimoire.desktop_ui import DesktopVoiceUi
 from osc_grimoire.openvr_overlay import (
     OpenVrOverlayRunner,
     OverlayMouseState,
+    is_button_pressed,
     is_trigger_pressed,
     next_mouse_events,
     overlay_transform_matrix,
@@ -23,6 +25,11 @@ def test_uv_to_imgui_preserves_overlay_y_axis() -> None:
 def test_trigger_pressed_uses_openvr_button_mask() -> None:
     assert is_trigger_pressed(1 << 33)
     assert not is_trigger_pressed(1 << 32)
+
+
+def test_button_pressed_uses_openvr_button_mask() -> None:
+    assert is_button_pressed(1 << 2, 2)
+    assert not is_button_pressed(1 << 1, 2)
 
 
 def test_next_mouse_events_preserves_release_after_hover_loss() -> None:
@@ -85,17 +92,39 @@ def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) ->
     assert runner.app.controller.status == "Waiting for controller tracking..."
 
 
+def test_runner_routes_grip_stroke_to_controller() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+
+    runner._update_gesture_capture(True, poses, 1)
+    runner._update_gesture_capture(False, poses, 1)
+
+    assert app.controller.gesture_count == 1
+
+
 class _FakeController:
     status = ""
+    config = type("Config", (), {"gesture": GestureRecognitionConfig()})()
+
+    def __init__(self) -> None:
+        self.gesture_count = 0
+
+    def handle_gesture_stroke(self, _points) -> None:
+        self.gesture_count += 1
 
 
 class _FakeApp:
-    controller = _FakeController()
+    def __init__(self) -> None:
+        self.controller = _FakeController()
 
 
 class _FakeOpenVr:
     k_unTrackedDeviceIndexInvalid = 999
+    k_unTrackedDeviceIndex_Hmd = 0
     k_EButton_SteamVR_Trigger = 33
+    k_EButton_Grip = 2
     TrackingUniverseStanding = 1
     TrackedControllerRole_LeftHand = 1
     TrackedControllerRole_RightHand = 2
@@ -119,3 +148,20 @@ class _FakeControllerState:
 
 class _FakeOverlay:
     pass
+
+
+class _FakePose:
+    bPoseIsValid = True
+
+    def __init__(self, matrix) -> None:
+        self.mDeviceToAbsoluteTracking = matrix
+
+
+def _matrix(translation: tuple[float, float, float]):
+    return SimpleNamespace(
+        m=[
+            [1.0, 0.0, 0.0, translation[0]],
+            [0.0, 1.0, 0.0, translation[1]],
+            [0.0, 0.0, 1.0, translation[2]],
+        ]
+    )

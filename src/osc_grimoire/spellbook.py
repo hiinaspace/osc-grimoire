@@ -119,8 +119,26 @@ def remove_voice_sample(
     return replace_spell(spellbook, updated)
 
 
+def set_gesture_sample(
+    spellbook: Spellbook, spell: Spell, relative_path: str
+) -> Spellbook:
+    current = find_spell_by_id(spellbook, spell.id)
+    if current is None:
+        raise ValueError(f"Spell {spell.id!r} not in spellbook")
+    updated = replace(
+        current,
+        has_gesture=True,
+        gesture_samples=(relative_path,),
+    )
+    return replace_spell(spellbook, updated)
+
+
 def voice_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
     return [spellbook.data_dir / rel for rel in spell.voice_samples]
+
+
+def gesture_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
+    return [spellbook.data_dir / rel for rel in spell.gesture_samples]
 
 
 def next_voice_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
@@ -135,6 +153,14 @@ def next_voice_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, st
             relative = candidate.relative_to(spellbook.data_dir).as_posix()
             return candidate, relative
         n += 1
+
+
+def gesture_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
+    samples_dir = spell_samples_dir(spellbook.data_dir, spell.id)
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    candidate = samples_dir / "gesture_001.json"
+    relative = candidate.relative_to(spellbook.data_dir).as_posix()
+    return candidate, relative
 
 
 def _spell_from_json(entry: dict) -> Spell:

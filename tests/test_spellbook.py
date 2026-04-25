@@ -9,9 +9,11 @@ from osc_grimoire.spellbook import (
     create_spell,
     delete_spell,
     find_spell_by_name,
+    gesture_sample_path,
     load_spellbook,
     next_voice_sample_path,
     save_spellbook,
+    set_gesture_sample,
 )
 
 
@@ -68,3 +70,16 @@ def test_next_voice_sample_path_increments(tmp_path: Path) -> None:
     assert rel1 == f"samples/spell_{spell.id}/voice_001.wav"
     assert rel2 == f"samples/spell_{spell.id}/voice_002.wav"
     assert abs1 != abs2
+
+
+def test_set_gesture_sample_overwrites_single_gesture(tmp_path: Path) -> None:
+    book = load_spellbook(tmp_path)
+    book, spell = create_spell(book, "Lumos")
+    _path, relative = gesture_sample_path(book, spell)
+
+    book = set_gesture_sample(book, spell, relative)
+    book = set_gesture_sample(book, spell, relative)
+
+    updated = book.spells[0]
+    assert updated.has_gesture
+    assert updated.gesture_samples == (relative,)

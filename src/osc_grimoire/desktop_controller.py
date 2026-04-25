@@ -7,17 +7,27 @@ import numpy as np
 import soundfile as sf
 
 from .config import AppConfig, VoiceRecognitionConfig
+from .gesture_recognizer import (
+    GestureDecision,
+    GestureRanking,
+    gesture_preview_points,
+    load_gesture_templates,
+    recognize_gesture,
+    save_gesture_points,
+)
 from .spellbook import (
     Spell,
     Spellbook,
     add_voice_sample,
     create_spell,
     find_spell_by_id,
+    gesture_sample_path,
     load_spellbook,
     next_voice_sample_path,
     remove_voice_sample,
     replace_spell,
     save_spellbook,
+    set_gesture_sample,
     voice_sample_abs_paths,
 )
 from .voice_embedding_backends import whisper_dtw_backend
@@ -52,6 +62,13 @@ class RecognitionResult:
 
 
 @dataclass(frozen=True)
+class GestureResult:
+    ranking: tuple[GestureRanking, ...]
+    decision: GestureDecision
+    debug_text: str
+
+
+@dataclass(frozen=True)
 class EmbeddingPoint:
     x: float
     y: float
@@ -80,6 +97,9 @@ class VoiceTrainingController:
         self.draft: DraftSpell | None = None
         self.status = "Ready."
         self.last_result: RecognitionResult | None = None
+        self.last_gesture_result: GestureResult | None = None
+        self.latest_gesture_points: FloatArray | None = None
+        self.armed_gesture_spell_id: str | None = None
         self.recent_query_vectors: list[tuple[FloatArray, Decision, str]] = []
         self._backend_stats: BackendStats | None = None
         self._feature_cache: dict[Path, FloatArray] | None = None
@@ -170,6 +190,63 @@ class VoiceTrainingController:
         self.status = f"Deleted sample from {fresh.name}."
         return fresh
 
+    def arm_gesture_recording(self, spell_id: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        self.armed_gesture_spell_id = spell.id
+        self.status = (
+            f"Armed gesture recording for {spell.name}. Hold right grip and draw."
+        )
+        return spell
+
+    def handle_gesture_stroke(self, points: FloatArray) -> GestureResult | Spell:
+        if self.armed_gesture_spell_id is not None:
+            spell_id = self.armed_gesture_spell_id
+            self.armed_gesture_spell_id = None
+            return self.save_gesture_sample(spell_id, points)
+        return self.recognize_gesture(points)
+
+    def save_gesture_sample(self, spell_id: str, points: FloatArray) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if points.shape[0] < self.config.gesture.min_points:
+            raise ValueError(
+                f"Gesture needs at least {self.config.gesture.min_points} points"
+            )
+        path, relative_path = gesture_sample_path(self.spellbook, spell)
+        save_gesture_points(path, points)
+        self.spellbook = set_gesture_sample(self.spellbook, spell, relative_path)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.latest_gesture_points = points
+        self.last_gesture_result = None
+        self.status = f"Saved gesture for {fresh.name}."
+        return fresh
+
+    def recognize_gesture(self, points: FloatArray) -> GestureResult:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        self.latest_gesture_points = points
+        if points.shape[0] < self.config.gesture.min_points:
+            result = GestureResult(
+                ranking=(),
+                decision=GestureDecision(False, "gesture too short"),
+                debug_text="gesture: rejected (gesture too short)",
+            )
+            self.last_gesture_result = result
+            self.status = "Gesture rejected."
+            return result
+        templates = load_gesture_templates(self.spellbook, self.config.gesture)
+        raw_result = recognize_gesture(points, templates, self.config.gesture)
+        result = GestureResult(
+            ranking=raw_result.ranking,
+            decision=raw_result.decision,
+            debug_text=format_gesture_debug(raw_result.ranking, raw_result.decision),
+        )
+        self.last_gesture_result = result
+        self.status = (
+            "Gesture accepted." if result.decision.accepted else "Gesture rejected."
+        )
+        return result
+
     def recognize(self, audio: FloatArray) -> RecognitionResult:
         if audio.size == 0:
             raise ValueError("No audio captured")
@@ -245,6 +322,9 @@ class VoiceTrainingController:
             else:
                 previews.append(np.zeros(points, dtype=np.float32))
         return previews
+
+    def gesture_preview(self, spell: Spell) -> FloatArray | None:
+        return gesture_preview_points(self.spellbook, spell, self.config.gesture)
 
     def next_default_spell_name(self) -> str:
         index = len(self.spellbook.spells) + 1
@@ -353,6 +433,22 @@ def format_recognition_debug(
         f"decision: {verdict} intra_ratio={intra_ratio} "
         f"margin_ratio={margin_ratio} ({decision.reason})"
     )
+    return "\n".join(lines)
+
+
+def format_gesture_debug(
+    ranking: tuple[GestureRanking, ...], decision: GestureDecision
+) -> str:
+    if not ranking:
+        return f"gesture: rejected ({decision.reason})"
+    lines: list[str] = []
+    for index, row in enumerate(ranking):
+        marker = "*" if index == 0 else " "
+        lines.append(
+            f"{marker} {row.name:<10} score={row.score:5.2f} d={row.distance:5.2f}"
+        )
+    state = "ACCEPTED" if decision.accepted else "rejected"
+    lines.append(f"gesture decision: {state} ({decision.reason})")
     return "\n".join(lines)
 
 

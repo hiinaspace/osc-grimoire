@@ -6,8 +6,14 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from osc_grimoire.config import AppConfig, AudioConfig, VoiceRecognitionConfig
+from osc_grimoire.config import (
+    AppConfig,
+    AudioConfig,
+    GestureRecognitionConfig,
+    VoiceRecognitionConfig,
+)
 from osc_grimoire.desktop_controller import VoiceTrainingController
+from osc_grimoire.gesture_recognizer import load_gesture_points
 from osc_grimoire.spellbook import load_spellbook
 from osc_grimoire.voice_features import FloatArray
 from osc_grimoire.voice_recognizer import VoiceTemplateBackend
@@ -136,6 +142,54 @@ def test_controller_updates_warm_feature_cache_incrementally(tmp_path: Path) -> 
     assert backend.extract_array_calls == 1
 
 
+def test_controller_saves_and_overwrites_gesture_sample(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(min_points=3),
+    )
+    spell = controller.add_sample_to_draft(_audio(440))
+
+    controller.arm_gesture_recording(spell.id)
+    controller.handle_gesture_stroke(_gesture_line())
+    controller.arm_gesture_recording(spell.id)
+    controller.handle_gesture_stroke(_gesture_zigzag())
+
+    fresh = load_spellbook(tmp_path).spells[0]
+    assert fresh.has_gesture
+    assert len(fresh.gesture_samples) == 1
+    points = load_gesture_points(tmp_path / fresh.gesture_samples[0])
+    np.testing.assert_allclose(points, _gesture_zigzag())
+
+
+def test_controller_recognizes_gesture(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(
+            min_points=3, score_min=0.5, margin_min=0.01
+        ),
+    )
+    spell = controller.add_sample_to_draft(_audio(440))
+    controller.save_gesture_sample(spell.id, _gesture_line())
+
+    result = controller.recognize_gesture(_gesture_line())
+
+    assert result.decision.accepted
+    assert result.ranking[0].name == spell.name
+
+
+def test_controller_rejects_short_gesture_without_mutation(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(min_points=4),
+    )
+    spell = controller.add_sample_to_draft(_audio(440))
+
+    with pytest.raises(ValueError):
+        controller.save_gesture_sample(spell.id, np.zeros((2, 2), dtype=np.float32))
+
+    assert load_spellbook(tmp_path).spells[0].gesture_samples == ()
+
+
 def test_waveform_preview_downsamples_and_loads_wav(tmp_path: Path) -> None:
     audio = np.linspace(-0.5, 0.5, 1000, dtype=np.float32)
     preview = downsample_waveform(audio, points=25)
@@ -179,8 +233,13 @@ def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> 
     assert not ui._can_edit_spell_names()
 
 
-def _controller(data_dir: Path) -> VoiceTrainingController:
-    config = AppConfig(audio=AudioConfig(sample_rate=16000))
+def _controller(
+    data_dir: Path, gesture_config: GestureRecognitionConfig | None = None
+) -> VoiceTrainingController:
+    config = AppConfig(
+        audio=AudioConfig(sample_rate=16000),
+        gesture=gesture_config or GestureRecognitionConfig(),
+    )
     return VoiceTrainingController(
         data_dir,
         config=config,
@@ -234,3 +293,14 @@ class _CountingBackend:
 def _audio(frequency: float) -> FloatArray:
     t = np.linspace(0, 0.5, 8000, endpoint=False, dtype=np.float32)
     return (0.25 * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+
+
+def _gesture_line() -> FloatArray:
+    x = np.linspace(0.0, 1.0, 12, dtype=np.float32)
+    return np.column_stack([x, np.zeros_like(x)]).astype(np.float32)
+
+
+def _gesture_zigzag() -> FloatArray:
+    x = np.linspace(0.0, 1.0, 12, dtype=np.float32)
+    y = np.where(np.arange(12) % 2 == 0, 0.0, 0.4).astype(np.float32)
+    return np.column_stack([x, y]).astype(np.float32)

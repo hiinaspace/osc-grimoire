@@ -112,6 +112,21 @@ class DesktopVoiceUi:
     def _draw_main_page(self) -> None:
         from imgui_bundle import imgui
 
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_prop
+            | imgui.TableFlags_.borders_inner_v
+            | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##main_page_folio", 2, table_flags):
+            return
+        imgui.table_setup_column(
+            "Recognition", imgui.TableColumnFlags_.width_stretch, 0.58
+        )
+        imgui.table_setup_column(
+            "Visualization", imgui.TableColumnFlags_.width_stretch, 0.42
+        )
+        imgui.table_next_row()
+        imgui.table_next_column()
         imgui.text("Spells")
         imgui.text("Use Prev/Next to flip to each spell page.")
         for spell in self.controller.spellbook.spells:
@@ -123,8 +138,6 @@ class DesktopVoiceUi:
                 self.edit_name = spell.name
                 self.page = self._page_for_spell_id(spell.id)
         imgui.separator()
-        self._draw_embedding_plot()
-        imgui.separator()
         self._hold_button(
             "Hold to Recognize" if self.overlay_mode else "Hold to Recognize (Space)",
             "recognize",
@@ -135,6 +148,18 @@ class DesktopVoiceUi:
         if result is not None:
             imgui.separator()
             imgui.text_unformatted(result.debug_text)
+        gesture_result = self.controller.last_gesture_result
+        if gesture_result is not None:
+            imgui.separator()
+            imgui.text_unformatted(gesture_result.debug_text)
+        imgui.table_next_column()
+        imgui.text("Embedding PCA")
+        self._draw_embedding_plot()
+        if self.controller.latest_gesture_points is not None:
+            self._draw_gesture_preview(
+                "Latest Gesture", self.controller.latest_gesture_points
+            )
+        imgui.end_table()
 
     def _draw_spell_page(self) -> None:
         from imgui_bundle import imgui
@@ -168,6 +193,14 @@ class DesktopVoiceUi:
         imgui.table_next_column()
         imgui.text("Embedding PCA")
         self._draw_embedding_plot()
+        if spell is not None:
+            self._draw_gesture_preview(
+                "Saved Gesture", self.controller.gesture_preview(spell)
+            )
+        if self.controller.latest_gesture_points is not None:
+            self._draw_gesture_preview(
+                "Latest Gesture", self.controller.latest_gesture_points
+            )
         imgui.end_table()
 
     def _draw_spell_controls(self, spell: Spell | None) -> None:
@@ -217,6 +250,9 @@ class DesktopVoiceUi:
         )
         imgui.same_line()
         self._hold_button("Hold to Test", "test", allow_space=False)
+        if spell is not None:
+            if imgui.button("Record / Replace Gesture", imgui.ImVec2(230, 42)):
+                self.controller.arm_gesture_recording(spell.id)
 
     def _draw_samples(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -287,6 +323,10 @@ class DesktopVoiceUi:
         imgui.separator()
         imgui.text("Embedding PCA")
         self._draw_embedding_plot()
+        gesture_result = self.controller.last_gesture_result
+        if gesture_result is not None:
+            imgui.separator()
+            imgui.text_unformatted(gesture_result.debug_text)
 
     def _hold_button(self, label: str, mode: str, *, allow_space: bool) -> None:
         from imgui_bundle import imgui
@@ -444,6 +484,49 @@ class DesktopVoiceUi:
             self._plot_query_points(points)
             implot.end_plot()
 
+    def _draw_gesture_preview(
+        self,
+        label: str,
+        points: FloatArray | None,
+        size: tuple[float, float] = (260, 150),
+    ) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text(label)
+        draw_size = imgui.ImVec2(size[0], size[1])
+        origin = imgui.get_cursor_screen_pos()
+        draw_list = imgui.get_window_draw_list()
+        bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.08, 0.07, 0.10, 1.0))
+        border = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.35, 0.33, 0.42, 1.0))
+        line = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.74, 0.88, 1.0, 1.0))
+        draw_list.add_rect_filled(
+            origin,
+            imgui.ImVec2(origin.x + draw_size.x, origin.y + draw_size.y),
+            bg,
+        )
+        draw_list.add_rect(
+            origin,
+            imgui.ImVec2(origin.x + draw_size.x, origin.y + draw_size.y),
+            border,
+        )
+        array = (
+            np.asarray(points, dtype=np.float32).reshape(-1, 2)
+            if points is not None
+            else np.zeros((0, 2), dtype=np.float32)
+        )
+        if array.shape[0] >= 2:
+            mapped = _map_gesture_points_to_rect(array, origin, draw_size)
+            for start, end in zip(mapped[:-1], mapped[1:], strict=False):
+                draw_list.add_line(start, end, line, 2.0)
+        elif array.shape[0] == 0:
+            text_pos = imgui.ImVec2(origin.x + 12.0, origin.y + draw_size.y * 0.45)
+            text_color = imgui.color_convert_float4_to_u32(
+                imgui.ImVec4(0.55, 0.55, 0.62, 1.0)
+            )
+            draw_list.add_text(text_pos, text_color, "(none)")
+        imgui.dummy(imgui.ImVec2(draw_size.x, draw_size.y + 6.0))
+
     def _ensure_implot_context(self) -> None:
         if self._implot_context_created:
             return
@@ -567,6 +650,25 @@ def _palette_color(index: int, alpha: float):
     )
     r, g, b = colors[index % len(colors)]
     return imgui.ImVec4(r, g, b, alpha)
+
+
+def _map_gesture_points_to_rect(points: np.ndarray, origin, size) -> list:
+    from imgui_bundle import imgui
+
+    minimum = points.min(axis=0)
+    maximum = points.max(axis=0)
+    span = maximum - minimum
+    scale = min(
+        (size.x - 20.0) / max(float(span[0]), 1e-6),
+        (size.y - 20.0) / max(float(span[1]), 1e-6),
+    )
+    centered = points - (minimum + maximum) * 0.5
+    center = np.asarray([origin.x + size.x * 0.5, origin.y + size.y * 0.5])
+    mapped = centered * scale
+    return [
+        imgui.ImVec2(float(center[0] + point[0]), float(center[1] - point[1]))
+        for point in mapped
+    ]
 
 
 if __name__ == "__main__":
