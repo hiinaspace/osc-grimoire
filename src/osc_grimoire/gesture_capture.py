@@ -28,6 +28,22 @@ class GestureStrokeSampler:
     def active(self) -> bool:
         return self._right is not None and self._up is not None
 
+    @property
+    def origin(self) -> PointArray | None:
+        return self._origin
+
+    @property
+    def right(self) -> PointArray | None:
+        return self._right
+
+    @property
+    def up(self) -> PointArray | None:
+        return self._up
+
+    @property
+    def points(self) -> PointArray:
+        return np.asarray(self._points, dtype=np.float32).reshape(-1, 2)
+
     def begin(self, hmd_matrix: Any) -> None:
         rotation = _rotation_from_matrix34(hmd_matrix)
         self._right = _normalize(rotation[:, 0])

@@ -47,6 +47,8 @@ class OpenVrOverlayConfig:
     overlay_hand: str = "left"
     pointer_hand: str = "right"
     overlay_width_m: float = 0.50
+    gesture_trail_width_m: float = 1.0
+    gesture_trail_texture_size: int = 512
     texture_width: int = 1000
     texture_height: int = 760
     offset_x: float = 0.06

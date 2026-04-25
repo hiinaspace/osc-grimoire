@@ -21,6 +21,8 @@ from .paths import default_data_dir
 LOGGER = logging.getLogger(__name__)
 OVERLAY_KEY = "space.hiina.osc_grimoire.spellbook"
 OVERLAY_NAME = "OSC Grimoire Spellbook"
+TRAIL_OVERLAY_KEY = "space.hiina.osc_grimoire.gesture_trail"
+TRAIL_OVERLAY_NAME = "OSC Grimoire Gesture Trail"
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,44 @@ def overlay_transform_matrix(config: OpenVrOverlayConfig) -> Any:
     return matrix
 
 
+def trail_transform_matrix(
+    right: np.ndarray, up: np.ndarray, origin: np.ndarray
+) -> Any:
+    import openvr
+
+    normal = np.cross(right, up)
+    normal_norm = float(np.linalg.norm(normal))
+    if normal_norm > 0.0:
+        normal = normal / normal_norm
+    matrix = openvr.HmdMatrix34_t()
+    for row in range(3):
+        matrix.m[row][0] = float(right[row])
+        matrix.m[row][1] = float(up[row])
+        matrix.m[row][2] = float(normal[row])
+        matrix.m[row][3] = float(origin[row])
+    return matrix
+
+
+def stroke_points_to_pixels(
+    points: np.ndarray, texture_width: int, texture_height: int, width_m: float
+) -> list[tuple[int, int]]:
+    if width_m <= 0.0:
+        return []
+    array = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    if array.shape[0] == 0:
+        return []
+    scale_x = texture_width / width_m
+    scale_y = texture_height / width_m
+    center_x = texture_width * 0.5
+    center_y = texture_height * 0.5
+    pixels: list[tuple[int, int]] = []
+    for point in array:
+        x = int(round(center_x + float(point[0]) * scale_x))
+        y = int(round(center_y + float(point[1]) * scale_y))
+        pixels.append((x, y))
+    return pixels
+
+
 def ray_from_pose(pose: Any) -> Ray:
     matrix = pose.mDeviceToAbsoluteTracking.m
     source = (float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3]))
@@ -156,6 +196,8 @@ class OpenVrOverlayRunner:
         self.vr_system: Any = None
         self.vr_overlay: Any = None
         self.overlay_handle: int | None = None
+        self.trail_overlay_handle: int | None = None
+        self.trail_texture: StrokeTrailTexture | None = None
         self.mouse_state = OverlayMouseState()
         self.gesture_sampler = GestureStrokeSampler(app.controller.config.gesture)
         self.grip_down = False
@@ -165,6 +207,11 @@ class OpenVrOverlayRunner:
         self._init_openvr()
         self.renderer = HiddenGlfwImGuiRenderer(
             self.config.texture_width, self.config.texture_height
+        )
+        self.trail_texture = StrokeTrailTexture(
+            self.config.gesture_trail_texture_size,
+            self.config.gesture_trail_texture_size,
+            self.config.gesture_trail_width_m,
         )
         try:
             assert self.overlay_handle is not None
@@ -187,6 +234,14 @@ class OpenVrOverlayRunner:
                 self.vr_overlay.destroyOverlay(self.overlay_handle)
             except Exception:
                 LOGGER.debug("Failed to destroy OpenVR overlay", exc_info=True)
+        if self.vr_overlay is not None and self.trail_overlay_handle is not None:
+            try:
+                self.vr_overlay.destroyOverlay(self.trail_overlay_handle)
+            except Exception:
+                LOGGER.debug("Failed to destroy gesture trail overlay", exc_info=True)
+        if self.trail_texture is not None:
+            self.trail_texture.shutdown()
+            self.trail_texture = None
         if self.renderer is not None:
             self.renderer.shutdown()
             self.renderer = None
@@ -211,6 +266,9 @@ class OpenVrOverlayRunner:
             self.overlay_handle = self.vr_overlay.createOverlay(
                 OVERLAY_KEY, OVERLAY_NAME
             )
+            self.trail_overlay_handle = self.vr_overlay.createOverlay(
+                TRAIL_OVERLAY_KEY, TRAIL_OVERLAY_NAME
+            )
             mouse_scale = openvr.HmdVector2_t()
             mouse_scale.v[0] = float(self.config.texture_width)
             mouse_scale.v[1] = float(self.config.texture_height)
@@ -220,6 +278,9 @@ class OpenVrOverlayRunner:
             )
             self.vr_overlay.setOverlayWidthInMeters(
                 self.overlay_handle, self.config.overlay_width_m
+            )
+            self.vr_overlay.setOverlayWidthInMeters(
+                self.trail_overlay_handle, self.config.gesture_trail_width_m
             )
             self.vr_overlay.showOverlay(self.overlay_handle)
         except Exception as exc:
@@ -312,19 +373,59 @@ class OpenVrOverlayRunner:
             self.gesture_sampler.add_controller_pose(
                 pointer_pose.mDeviceToAbsoluteTracking
             )
+            self._show_gesture_trail()
+            self._update_gesture_trail()
             self.app.controller.status = "Recording gesture..."
         elif grip_down and self.gesture_sampler.active and pointer_pose.bPoseIsValid:
             self.gesture_sampler.add_controller_pose(
                 pointer_pose.mDeviceToAbsoluteTracking
             )
+            self._update_gesture_trail()
         elif not grip_down and self.grip_down:
             points = self.gesture_sampler.finish()
+            self._hide_gesture_trail()
             try:
                 self.app.controller.handle_gesture_stroke(points)
             except Exception as exc:
                 LOGGER.exception("Gesture action failed")
                 self.app.controller.status = str(exc)
         self.grip_down = grip_down
+
+    def _show_gesture_trail(self) -> None:
+        assert self.vr_overlay is not None
+        assert self.trail_overlay_handle is not None
+        if not self._update_gesture_trail_transform():
+            return
+        self.vr_overlay.showOverlay(self.trail_overlay_handle)
+
+    def _hide_gesture_trail(self) -> None:
+        if self.vr_overlay is None or self.trail_overlay_handle is None:
+            return
+        if self.trail_texture is not None:
+            self.trail_texture.clear()
+        self.vr_overlay.hideOverlay(self.trail_overlay_handle)
+
+    def _update_gesture_trail(self) -> None:
+        if self.trail_texture is None:
+            return
+        self._update_gesture_trail_transform()
+        self.trail_texture.update(self.gesture_sampler.points)
+        self._submit_trail_texture()
+
+    def _update_gesture_trail_transform(self) -> bool:
+        assert self.openvr is not None
+        assert self.vr_overlay is not None
+        assert self.trail_overlay_handle is not None
+        right = self.gesture_sampler.right
+        up = self.gesture_sampler.up
+        origin = self.gesture_sampler.origin
+        if right is None or up is None or origin is None:
+            return False
+        transform = trail_transform_matrix(right, up, origin)
+        self.vr_overlay.setOverlayTransformAbsolute(
+            self.trail_overlay_handle, self.openvr.TrackingUniverseStanding, transform
+        )
+        return True
 
     def _apply_mouse_events(
         self,
@@ -382,6 +483,18 @@ class OpenVrOverlayRunner:
             self.openvr.ColorSpace_Auto,
         )
         self.vr_overlay.setOverlayTexture(self.overlay_handle, texture)
+
+    def _submit_trail_texture(self) -> None:
+        assert self.openvr is not None
+        assert self.vr_overlay is not None
+        assert self.trail_overlay_handle is not None
+        assert self.trail_texture is not None
+        texture = self.openvr.Texture_t(
+            ctypes.c_void_p(int(self.trail_texture.texture_id)),
+            self.openvr.TextureType_OpenGL,
+            self.openvr.ColorSpace_Auto,
+        )
+        self.vr_overlay.setOverlayTexture(self.trail_overlay_handle, texture)
 
     def _overlay_device_index(self) -> int:
         assert self.openvr is not None
@@ -544,6 +657,107 @@ class HiddenGlfwImGuiRenderer:
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
         if status != gl.GL_FRAMEBUFFER_COMPLETE:
             raise OpenVrOverlayError(f"OpenGL framebuffer is incomplete: {status}")
+
+
+class StrokeTrailTexture:
+    def __init__(self, width: int, height: int, width_m: float) -> None:
+        self.width = width
+        self.height = height
+        self.width_m = width_m
+        self.texture_id = 0
+        self._pixels = np.zeros((height, width, 4), dtype=np.uint8)
+        self._init_texture()
+
+    def update(self, points: np.ndarray) -> None:
+        self._pixels.fill(0)
+        pixels = stroke_points_to_pixels(points, self.width, self.height, self.width_m)
+        if len(pixels) == 1:
+            _draw_point(self._pixels, pixels[0], radius=3)
+        else:
+            for start, end in zip(pixels[:-1], pixels[1:], strict=False):
+                _draw_line(self._pixels, start, end, radius=2)
+        self._upload()
+
+    def clear(self) -> None:
+        self._pixels.fill(0)
+        self._upload()
+
+    def shutdown(self) -> None:
+        if not self.texture_id:
+            return
+        import OpenGL.GL as gl
+
+        gl.glDeleteTextures([self.texture_id])
+        self.texture_id = 0
+
+    def _init_texture(self) -> None:
+        import OpenGL.GL as gl
+
+        self.texture_id = int(gl.glGenTextures(1))
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_id)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGBA8,
+            self.width,
+            self.height,
+            0,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            self._pixels,
+        )
+
+    def _upload(self) -> None:
+        import OpenGL.GL as gl
+
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_id)
+        gl.glTexSubImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            self.width,
+            self.height,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            self._pixels,
+        )
+
+
+def _draw_line(
+    pixels: np.ndarray, start: tuple[int, int], end: tuple[int, int], *, radius: int
+) -> None:
+    x0, y0 = start
+    x1, y1 = end
+    dx = abs(x1 - x0)
+    sx = 1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    error = dx + dy
+    while True:
+        _draw_point(pixels, (x0, y0), radius=radius)
+        if x0 == x1 and y0 == y1:
+            return
+        double_error = 2 * error
+        if double_error >= dy:
+            error += dy
+            x0 += sx
+        if double_error <= dx:
+            error += dx
+            y0 += sy
+
+
+def _draw_point(pixels: np.ndarray, point: tuple[int, int], *, radius: int) -> None:
+    x, y = point
+    height, width = pixels.shape[:2]
+    for py in range(max(0, y - radius), min(height, y + radius + 1)):
+        for px in range(max(0, x - radius), min(width, x + radius + 1)):
+            if (px - x) * (px - x) + (py - y) * (py - y) <= radius * radius:
+                pixels[py, px] = (64, 255, 96, 230)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

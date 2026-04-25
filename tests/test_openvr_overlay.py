@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,8 @@ from osc_grimoire.openvr_overlay import (
     is_trigger_pressed,
     next_mouse_events,
     overlay_transform_matrix,
+    stroke_points_to_pixels,
+    trail_transform_matrix,
     uv_to_imgui,
 )
 
@@ -62,6 +64,34 @@ def test_overlay_config_defaults_left_anchor_right_pointer_large_overlay() -> No
     assert config.overlay_hand == "left"
     assert config.pointer_hand == "right"
     assert config.overlay_width_m == 0.50
+    assert config.gesture_trail_width_m == 1.0
+
+
+def test_stroke_points_to_pixels_matches_overlay_y_axis() -> None:
+    points = [[0.0, 0.0], [0.25, -0.25]]
+
+    pixels = stroke_points_to_pixels(
+        cast(Any, points), texture_width=100, texture_height=100, width_m=1.0
+    )
+
+    assert pixels == [(50, 50), (75, 25)]
+
+
+def test_trail_transform_uses_plane_axes_and_origin() -> None:
+    openvr = pytest.importorskip("openvr")
+    matrix = trail_transform_matrix(
+        cast(Any, [1.0, 0.0, 0.0]),
+        cast(Any, [0.0, 1.0, 0.0]),
+        cast(Any, [2.0, 3.0, 4.0]),
+    )
+
+    assert isinstance(matrix, openvr.HmdMatrix34_t)
+    assert matrix.m[0][0] == 1.0
+    assert matrix.m[1][1] == 1.0
+    assert matrix.m[2][2] == 1.0
+    assert matrix.m[0][3] == 2.0
+    assert matrix.m[1][3] == 3.0
+    assert matrix.m[2][3] == 4.0
 
 
 def test_openvr_overlay_import_smoke() -> None:
@@ -97,11 +127,15 @@ def test_runner_routes_grip_stroke_to_controller() -> None:
     runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
     runner.openvr = _FakeOpenVr()
     poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    runner.vr_overlay = _FakeOverlay()
+    runner.trail_overlay_handle = 456
 
     runner._update_gesture_capture(True, poses, 1)
     runner._update_gesture_capture(False, poses, 1)
 
     assert app.controller.gesture_count == 1
+    assert runner.vr_overlay.shown == [456]
+    assert runner.vr_overlay.hidden == [456]
 
 
 class _FakeController:
@@ -147,7 +181,18 @@ class _FakeControllerState:
 
 
 class _FakeOverlay:
-    pass
+    def __init__(self) -> None:
+        self.shown: list[int] = []
+        self.hidden: list[int] = []
+
+    def showOverlay(self, handle: int) -> None:
+        self.shown.append(handle)
+
+    def hideOverlay(self, handle: int) -> None:
+        self.hidden.append(handle)
+
+    def setOverlayTransformAbsolute(self, _handle: int, _origin: int, _matrix) -> None:
+        pass
 
 
 class _FakePose:
