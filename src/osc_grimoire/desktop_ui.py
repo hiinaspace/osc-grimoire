@@ -25,8 +25,16 @@ PAGE_DIAGNOSTICS = -1
 
 
 class DesktopVoiceUi:
-    def __init__(self, controller: VoiceTrainingController) -> None:
+    def __init__(
+        self,
+        controller: VoiceTrainingController,
+        *,
+        overlay_mode: bool = False,
+        surface_size: tuple[int, int] = (1000, 760),
+    ) -> None:
         self.controller = controller
+        self.overlay_mode = overlay_mode
+        self.surface_size = surface_size
         self.selected_spell_id: str | None = (
             controller.spellbook.spells[0].id if controller.spellbook.spells else None
         )
@@ -42,11 +50,23 @@ class DesktopVoiceUi:
         from imgui_bundle import imgui
 
         self._ensure_implot_context()
-        imgui.set_next_window_size(imgui.ImVec2(980, 720))
+        window_flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_collapse
+        if self.overlay_mode:
+            imgui.set_next_window_pos(imgui.ImVec2(0, 0))
+            imgui.set_next_window_size(
+                imgui.ImVec2(float(self.surface_size[0]), float(self.surface_size[1]))
+            )
+            window_flags |= (
+                imgui.WindowFlags_.no_decoration
+                | imgui.WindowFlags_.no_move
+                | imgui.WindowFlags_.no_saved_settings
+            )
+        else:
+            imgui.set_next_window_size(imgui.ImVec2(980, 720))
         _expanded, _open = imgui.begin(
             "OSC Grimoire",
             None,
-            imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_collapse,
+            window_flags,
         )
         self._draw_nav()
         imgui.separator()
@@ -61,6 +81,8 @@ class DesktopVoiceUi:
         if self.recorder_error:
             imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.25, 1.0), self.recorder_error)
         imgui.end()
+        if self.overlay_mode:
+            self._draw_overlay_cursor()
 
     def _draw_nav(self) -> None:
         from imgui_bundle import imgui
@@ -103,7 +125,11 @@ class DesktopVoiceUi:
         imgui.separator()
         self._draw_embedding_plot()
         imgui.separator()
-        self._hold_button("Hold to Recognize (Space)", "recognize", allow_space=True)
+        self._hold_button(
+            "Hold to Recognize" if self.overlay_mode else "Hold to Recognize (Space)",
+            "recognize",
+            allow_space=not self.overlay_mode,
+        )
 
         result = self.controller.last_result
         if result is not None:
@@ -147,25 +173,29 @@ class DesktopVoiceUi:
     def _draw_spell_controls(self, spell: Spell | None) -> None:
         from imgui_bundle import imgui
 
-        changed, new_name = imgui.input_text("Spell name", self.edit_name)
-        if changed:
-            self.edit_name = new_name
-            if self.controller.draft is not None:
-                self.controller.update_draft_name(new_name)
+        if not self._can_edit_spell_names():
+            imgui.text(f"Spell name: {self.edit_name}")
+        else:
+            changed, new_name = imgui.input_text("Spell name", self.edit_name)
+            if changed:
+                self.edit_name = new_name
+                if self.controller.draft is not None:
+                    self.controller.update_draft_name(new_name)
 
         if spell is None:
-            if imgui.button("Save Empty Spell"):
-                spell = self.controller.persist_draft()
-                self.selected_spell_id = spell.id
-                self.edit_name = spell.name
-            imgui.same_line()
+            if self._can_edit_spell_names():
+                if imgui.button("Save Empty Spell"):
+                    spell = self.controller.persist_draft()
+                    self.selected_spell_id = spell.id
+                    self.edit_name = spell.name
+                imgui.same_line()
             if imgui.button("Cancel Draft"):
                 self.controller.cancel_draft()
                 self.selected_spell_id = None
                 self.edit_name = ""
                 self.page = PAGE_MAIN
         else:
-            if imgui.button("Save Name"):
+            if self._can_edit_spell_names() and imgui.button("Save Name"):
                 spell = self.controller.rename_spell(spell.id, self.edit_name)
                 self.selected_spell_id = spell.id
                 self.edit_name = spell.name
@@ -178,7 +208,13 @@ class DesktopVoiceUi:
             f"{sample_count}/{DEFAULT_SAMPLE_TARGET} samples",
         )
 
-        self._hold_button("Hold to Record Sample (Space)", "sample", allow_space=True)
+        self._hold_button(
+            "Hold to Record Sample"
+            if self.overlay_mode
+            else "Hold to Record Sample (Space)",
+            "sample",
+            allow_space=not self.overlay_mode,
+        )
         imgui.same_line()
         self._hold_button("Hold to Test", "test", allow_space=False)
 
@@ -217,6 +253,24 @@ class DesktopVoiceUi:
                 )
             imgui.pop_id()
         imgui.end_table()
+
+    def _can_edit_spell_names(self) -> bool:
+        return not self.overlay_mode
+
+    def _draw_overlay_cursor(self) -> None:
+        from imgui_bundle import imgui
+
+        mouse_pos = imgui.get_mouse_pos()
+        if mouse_pos.x < 0.0 or mouse_pos.y < 0.0:
+            return
+        if mouse_pos.x > self.surface_size[0] or mouse_pos.y > self.surface_size[1]:
+            return
+        draw_list = imgui.get_foreground_draw_list()
+        center = imgui.ImVec2(mouse_pos.x, mouse_pos.y)
+        outer = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.0, 0.0, 0.0, 0.9))
+        inner = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 1.0, 1.0, 1.0))
+        draw_list.add_circle_filled(center, 7.0, outer, 16)
+        draw_list.add_circle_filled(center, 4.0, inner, 16)
 
     def _draw_diagnostics_page(self) -> None:
         from imgui_bundle import imgui
@@ -415,6 +469,9 @@ class DesktopVoiceUi:
             spec.marker_size = 6.0
             spec.marker_fill_color = color
             spec.marker_line_color = color
+            spec.fill_color = color
+            spec.line_color = color
+            spec.fill_alpha = 1.0
             spec.line_weight = 0.0
             xs = np.array([p.x for p in group_points], dtype=np.float64)
             ys = np.array([p.y for p in group_points], dtype=np.float64)

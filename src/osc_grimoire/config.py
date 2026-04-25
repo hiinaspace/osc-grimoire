@@ -33,8 +33,21 @@ class VoiceRecognitionConfig:
 
 
 @dataclass(frozen=True)
+class OpenVrOverlayConfig:
+    overlay_hand: str = "left"
+    pointer_hand: str = "right"
+    overlay_width_m: float = 0.50
+    texture_width: int = 1000
+    texture_height: int = 760
+    offset_x: float = 0.06
+    offset_y: float = 0.06
+    offset_z: float = -0.22
+
+
+@dataclass(frozen=True)
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     voice: VoiceRecognitionConfig = field(default_factory=VoiceRecognitionConfig)
+    openvr: OpenVrOverlayConfig = field(default_factory=OpenVrOverlayConfig)
     hotkey: str = "space"
     default_samples_per_spell: int = 5

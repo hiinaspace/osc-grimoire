@@ -21,11 +21,14 @@ dependencies = [
     "matplotlib>=3.10.0",
     "psutil>=7.0.0",
     "imgui-bundle[glfw]>=1.92.0",
+    "openvr>=2.12.1401",
+    "pyopengl>=3.1",
 ]
 
 [project.scripts]
 osc-grimoire = "osc_grimoire:main"
 osc-grimoire-ui = "osc_grimoire.desktop_ui:main"
+osc-grimoire-overlay = "osc_grimoire.openvr_overlay:main"
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]

@@ -28,6 +28,7 @@ from .voice_recognizer import (
     SpellRanking,
     VoiceTemplateBackend,
     compute_backend_stats,
+    compute_intra_class_median,
     decide,
     rank_spells,
     recompute_spell_voice_stats,
@@ -122,7 +123,6 @@ class VoiceTrainingController:
         save_spellbook(self.spellbook)
         self.draft = None
         self.status = f"Created {spell.name}."
-        self._invalidate_recognition_cache()
         return spell
 
     def rename_spell(self, spell_id: str, name: str) -> Spell:
@@ -146,7 +146,7 @@ class VoiceTrainingController:
         self.spellbook = add_voice_sample(self.spellbook, spell, relative_path)
         self.spellbook = self._recompute_spell(spell.id)
         save_spellbook(self.spellbook)
-        self._invalidate_recognition_cache()
+        self._update_recognition_cache_after_add(path, audio)
         fresh = self._spell_or_raise(spell.id)
         self.status = f"Saved sample {len(fresh.voice_samples)}/{DEFAULT_SAMPLE_TARGET} for {fresh.name}."
         return fresh
@@ -165,7 +165,7 @@ class VoiceTrainingController:
             path.unlink()
         self.spellbook = self._recompute_spell(spell.id)
         save_spellbook(self.spellbook)
-        self._invalidate_recognition_cache()
+        self._update_recognition_cache_after_delete(path)
         fresh = self._spell_or_raise(spell.id)
         self.status = f"Deleted sample from {fresh.name}."
         return fresh
@@ -264,6 +264,40 @@ class VoiceTrainingController:
                 self.spellbook, self.voice_config, self.backend
             )
         return self._backend_stats, self._feature_cache
+
+    def _update_recognition_cache_after_add(
+        self, path: Path, audio: FloatArray
+    ) -> None:
+        if self._feature_cache is None:
+            return
+        self._feature_cache[path] = self.backend.extract_array(
+            audio, self.voice_config, self.config.audio.sample_rate
+        )
+        self._refresh_backend_stats_from_cache()
+        self.recent_query_vectors.clear()
+
+    def _update_recognition_cache_after_delete(self, path: Path) -> None:
+        if self._feature_cache is None:
+            return
+        self._feature_cache.pop(path, None)
+        self._refresh_backend_stats_from_cache()
+        self.recent_query_vectors.clear()
+
+    def _refresh_backend_stats_from_cache(self) -> None:
+        assert self._feature_cache is not None
+        intra_class_medians: dict[str, float | None] = {}
+        for spell in self.spellbook.spells:
+            if not spell.has_voice or not spell.voice_samples:
+                continue
+            features = [
+                self._feature_cache[path]
+                for path in voice_sample_abs_paths(self.spellbook, spell)
+                if path in self._feature_cache
+            ]
+            intra_class_medians[spell.id] = compute_intra_class_median(
+                features, self.backend
+            )
+        self._backend_stats = BackendStats(intra_class_medians, 0.0)
 
     def _invalidate_recognition_cache(self) -> None:
         self._backend_stats = None

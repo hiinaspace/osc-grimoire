@@ -117,6 +117,25 @@ def test_controller_preloads_backend(tmp_path: Path) -> None:
     assert backend.extract_array_calls == 1
 
 
+def test_controller_updates_warm_feature_cache_incrementally(tmp_path: Path) -> None:
+    backend = _CountingBackend()
+    controller = VoiceTrainingController(
+        tmp_path,
+        config=AppConfig(audio=AudioConfig(sample_rate=16000)),
+        backend=backend.backend,
+        voice_config=VoiceRecognitionConfig(relative_margin_min=0.0),
+    )
+    spell = controller.add_sample_to_draft(_audio(440))
+    controller._recognition_cache()
+    backend.extract_path_calls = 0
+    backend.extract_array_calls = 0
+
+    controller.add_sample_to_spell(spell.id, _audio(660))
+
+    assert backend.extract_path_calls == 0
+    assert backend.extract_array_calls == 1
+
+
 def test_waveform_preview_downsamples_and_loads_wav(tmp_path: Path) -> None:
     audio = np.linspace(-0.5, 0.5, 1000, dtype=np.float32)
     preview = downsample_waveform(audio, points=25)
@@ -151,6 +170,15 @@ def test_desktop_ui_pages_follow_spell_order(tmp_path: Path) -> None:
     assert ui.selected_spell_id == first.id
 
 
+def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+
+    assert not ui._can_edit_spell_names()
+
+
 def _controller(data_dir: Path) -> VoiceTrainingController:
     config = AppConfig(audio=AudioConfig(sample_rate=16000))
     return VoiceTrainingController(
@@ -183,13 +211,18 @@ def _fake_backend() -> VoiceTemplateBackend:
 class _CountingBackend:
     def __init__(self) -> None:
         self.extract_array_calls = 0
+        self.extract_path_calls = 0
         self.backend = VoiceTemplateBackend(
             name="counting",
-            extract_path=lambda _path, _config: np.array([[0.0]], dtype=np.float32),
+            extract_path=self.extract_path,
             extract_array=self.extract_array,
             distance=lambda a, b: float(abs(a[0, 0] - b[0, 0])),
             aggregate=lambda distances: float(np.median(distances)),
         )
+
+    def extract_path(self, _path: Path, _config: VoiceRecognitionConfig) -> FloatArray:
+        self.extract_path_calls += 1
+        return np.array([[0.0]], dtype=np.float32)
 
     def extract_array(
         self, audio: FloatArray, _config: VoiceRecognitionConfig, _sample_rate: int
