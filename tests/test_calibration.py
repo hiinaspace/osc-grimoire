@@ -141,3 +141,25 @@ def test_embedding_backend_missing_dependencies_message(
     assert str(exc_info.value) == missing_embedding_dependencies_message()
     assert "uv sync --group ml" in str(exc_info.value)
     _load_model.cache_clear()
+
+
+def test_openwakeword_backend_missing_dependencies_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from osc_grimoire.openwakeword_backends import (
+        MissingOpenWakeWordDependenciesError,
+        _load_openwakeword,
+        missing_openwakeword_dependencies_message,
+    )
+
+    _load_openwakeword.cache_clear()
+    monkeypatch.setattr(
+        "osc_grimoire.openwakeword_backends._openwakeword_repo_candidates",
+        lambda: (),
+    )
+    with pytest.raises(MissingOpenWakeWordDependenciesError) as exc_info:
+        _load_openwakeword()
+
+    assert str(exc_info.value) == missing_openwakeword_dependencies_message()
+    assert "uv sync --group oww" in str(exc_info.value)
+    _load_openwakeword.cache_clear()

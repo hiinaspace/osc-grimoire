@@ -190,6 +190,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-mean",
             "w2vbert-dtw",
             "w2vbert-mean",
+            "oww-dtw",
+            "oww-mean",
             "all",
         ],
         help="Recognizer backend to evaluate (default: mfcc-dtw).",
@@ -675,8 +677,26 @@ def _resolve_diagnose_backends(
         "conformer-mean",
         "w2vbert-dtw",
         "w2vbert-mean",
+        "oww-dtw",
+        "oww-mean",
         "all",
     }:
+        if backend_name in {"oww-dtw", "oww-mean"}:
+            try:
+                from .openwakeword_backends import (
+                    openwakeword_dtw_backend,
+                    openwakeword_mean_backend,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "OpenWakeWord backend module could not be imported. "
+                    "Run `uv sync --group oww`, then retry."
+                ) from exc
+
+            if backend_name == "oww-dtw":
+                return [openwakeword_dtw_backend()]
+            return [openwakeword_mean_backend()]
+
         try:
             from .voice_embedding_backends import (
                 DEFAULT_CONFORMER_MODEL,
@@ -716,6 +736,11 @@ def _resolve_diagnose_backends(
             model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
             return [wav2vec2_bert_mean_backend(model)]
         try:
+            from .openwakeword_backends import (
+                openwakeword_dtw_backend,
+                openwakeword_mean_backend,
+            )
+
             return [
                 MFCC_DTW_BACKEND,
                 wavlm_dtw_backend(DEFAULT_EMBEDDING_MODEL),
@@ -724,6 +749,8 @@ def _resolve_diagnose_backends(
                 conformer_mean_backend(DEFAULT_CONFORMER_MODEL),
                 wav2vec2_bert_dtw_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
                 wav2vec2_bert_mean_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
+                openwakeword_dtw_backend(),
+                openwakeword_mean_backend(),
             ]
         except MissingEmbeddingDependenciesError as exc:
             raise RuntimeError(missing_embedding_dependencies_message()) from exc

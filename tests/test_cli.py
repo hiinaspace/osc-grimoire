@@ -52,3 +52,8 @@ def test_resolve_conformer_backend_name_without_loading_model() -> None:
 def test_resolve_w2vbert_backend_name_without_loading_model() -> None:
     backend = _resolve_diagnose_backends("w2vbert-mean", None)[0]
     assert backend.name.startswith("w2vbert-mean:")
+
+
+def test_resolve_openwakeword_backend_name_without_loading_model() -> None:
+    backend = _resolve_diagnose_backends("oww-dtw", None)[0]
+    assert backend.name == "oww-dtw:speech_embedding"
