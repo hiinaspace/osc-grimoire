@@ -190,6 +190,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-mean",
             "w2vbert-dtw",
             "w2vbert-mean",
+            "whisper-dtw",
+            "whisper-mean",
             "oww-dtw",
             "oww-mean",
             "all",
@@ -199,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument(
         "--embedding-model",
         default=None,
-        help="Hugging Face model for WavLM/HuBERT backends.",
+        help="Hugging Face model for neural embedding backends.",
     )
     p_diag.add_argument(
         "--plot-dir",
@@ -677,6 +679,8 @@ def _resolve_diagnose_backends(
         "conformer-mean",
         "w2vbert-dtw",
         "w2vbert-mean",
+        "whisper-dtw",
+        "whisper-mean",
         "oww-dtw",
         "oww-mean",
         "all",
@@ -702,6 +706,7 @@ def _resolve_diagnose_backends(
                 DEFAULT_CONFORMER_MODEL,
                 DEFAULT_EMBEDDING_MODEL,
                 DEFAULT_WAV2VEC2_BERT_MODEL,
+                DEFAULT_WHISPER_MODEL,
                 MissingEmbeddingDependenciesError,
                 conformer_dtw_backend,
                 conformer_mean_backend,
@@ -710,6 +715,8 @@ def _resolve_diagnose_backends(
                 wav2vec2_bert_mean_backend,
                 wavlm_dtw_backend,
                 wavlm_mean_backend,
+                whisper_dtw_backend,
+                whisper_mean_backend,
             )
         except ImportError as exc:
             raise RuntimeError(
@@ -735,6 +742,12 @@ def _resolve_diagnose_backends(
         if backend_name == "w2vbert-mean":
             model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
             return [wav2vec2_bert_mean_backend(model)]
+        if backend_name == "whisper-dtw":
+            model = embedding_model or DEFAULT_WHISPER_MODEL
+            return [whisper_dtw_backend(model)]
+        if backend_name == "whisper-mean":
+            model = embedding_model or DEFAULT_WHISPER_MODEL
+            return [whisper_mean_backend(model)]
         try:
             from .openwakeword_backends import (
                 openwakeword_dtw_backend,
@@ -749,6 +762,8 @@ def _resolve_diagnose_backends(
                 conformer_mean_backend(DEFAULT_CONFORMER_MODEL),
                 wav2vec2_bert_dtw_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
                 wav2vec2_bert_mean_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
+                whisper_dtw_backend(DEFAULT_WHISPER_MODEL),
+                whisper_mean_backend(DEFAULT_WHISPER_MODEL),
                 openwakeword_dtw_backend(),
                 openwakeword_mean_backend(),
             ]

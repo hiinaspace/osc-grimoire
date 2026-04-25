@@ -19,6 +19,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_MODEL = "microsoft/wavlm-base-plus"
 DEFAULT_CONFORMER_MODEL = "facebook/wav2vec2-conformer-rel-pos-large"
 DEFAULT_WAV2VEC2_BERT_MODEL = "facebook/w2v-bert-2.0"
+DEFAULT_WHISPER_MODEL = "openai/whisper-tiny"
 
 
 class MissingEmbeddingDependenciesError(RuntimeError):
@@ -76,6 +77,18 @@ def wav2vec2_bert_mean_backend(
     return hf_mean_backend("w2vbert-mean", model_name)
 
 
+def whisper_dtw_backend(
+    model_name: str = DEFAULT_WHISPER_MODEL,
+) -> VoiceTemplateBackend:
+    return whisper_frame_dtw_backend("whisper-dtw", model_name)
+
+
+def whisper_mean_backend(
+    model_name: str = DEFAULT_WHISPER_MODEL,
+) -> VoiceTemplateBackend:
+    return whisper_mean_pool_backend("whisper-mean", model_name)
+
+
 def hf_frame_dtw_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
     return VoiceTemplateBackend(
         name=_backend_name(kind, model_name),
@@ -97,6 +110,34 @@ def hf_mean_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
             path, config, model_name
         ),
         extract_array=lambda audio, config, sample_rate: _extract_mean_embedding(
+            audio, config, sample_rate, model_name
+        ),
+        distance=_cosine_distance,
+        aggregate=lambda distances: float(np.median(distances)),
+    )
+
+
+def whisper_frame_dtw_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
+    return VoiceTemplateBackend(
+        name=_backend_name(kind, model_name),
+        extract_path=lambda path, config: _extract_whisper_frames_from_path(
+            path, config, model_name
+        ),
+        extract_array=lambda audio, config, sample_rate: _extract_whisper_frames(
+            audio, config, sample_rate, model_name
+        ),
+        distance=_dtw_distance,
+        aggregate=lambda distances: float(np.median(distances)),
+    )
+
+
+def whisper_mean_pool_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
+    return VoiceTemplateBackend(
+        name=_backend_name(kind, model_name),
+        extract_path=lambda path, config: _extract_whisper_mean_from_path(
+            path, config, model_name
+        ),
+        extract_array=lambda audio, config, sample_rate: _extract_whisper_mean(
             audio, config, sample_rate, model_name
         ),
         distance=_cosine_distance,
@@ -127,6 +168,24 @@ def _extract_mean_embedding_from_path(
     )
 
 
+def _extract_whisper_frames_from_path(
+    path: Path, config: VoiceRecognitionConfig, model_name: str
+) -> FloatArray:
+    audio, sample_rate = librosa.load(str(path), sr=16000, mono=True)
+    return _extract_whisper_frames(
+        audio.astype(np.float32), config, int(sample_rate), model_name
+    )
+
+
+def _extract_whisper_mean_from_path(
+    path: Path, config: VoiceRecognitionConfig, model_name: str
+) -> FloatArray:
+    audio, sample_rate = librosa.load(str(path), sr=16000, mono=True)
+    return _extract_whisper_mean(
+        audio.astype(np.float32), config, int(sample_rate), model_name
+    )
+
+
 def _extract_frame_embeddings(
     audio: FloatArray,
     config: VoiceRecognitionConfig,
@@ -148,6 +207,39 @@ def _extract_frame_embeddings(
     return _l2_normalize(hidden)
 
 
+def _extract_whisper_frames(
+    audio: FloatArray,
+    config: VoiceRecognitionConfig,
+    sample_rate: int,
+    model_name: str,
+) -> FloatArray:
+    audio = _prepare_audio(audio, config, sample_rate)
+    bundle = _load_model(model_name)
+    inputs = bundle.feature_extractor(
+        audio,
+        sampling_rate=16000,
+        return_tensors="pt",
+    )
+    with bundle.torch.inference_mode():
+        encoder = getattr(bundle.model, "encoder", None)
+        outputs = encoder(**inputs) if encoder is not None else bundle.model(**inputs)
+    hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()
+    hidden = hidden.astype(np.float32)
+    frame_count = _whisper_frame_count(audio, hidden.shape[0])
+    return _l2_normalize(hidden[:frame_count])
+
+
+def _extract_whisper_mean(
+    audio: FloatArray,
+    config: VoiceRecognitionConfig,
+    sample_rate: int,
+    model_name: str,
+) -> FloatArray:
+    frames = _extract_whisper_frames(audio, config, sample_rate, model_name)
+    pooled = frames.mean(axis=0, keepdims=True)
+    return _l2_normalize(pooled)
+
+
 def _extract_mean_embedding(
     audio: FloatArray,
     config: VoiceRecognitionConfig,
@@ -157,6 +249,12 @@ def _extract_mean_embedding(
     frames = _extract_frame_embeddings(audio, config, sample_rate, model_name)
     pooled = frames.mean(axis=0, keepdims=True)
     return _l2_normalize(pooled)
+
+
+def _whisper_frame_count(audio: FloatArray, total_frames: int) -> int:
+    seconds = float(audio.shape[0]) / 16000.0
+    frames = int(np.ceil(seconds * total_frames / 30.0))
+    return max(1, min(total_frames, frames))
 
 
 def _prepare_audio(
@@ -175,7 +273,7 @@ def _prepare_audio(
     return trimmed.astype(np.float32)
 
 
-@functools.lru_cache(maxsize=2)
+@functools.lru_cache(maxsize=4)
 def _load_model(model_name: str) -> EmbeddingModelBundle:
     try:
         import torch
