@@ -6,7 +6,11 @@ import numpy as np
 import soundfile as sf
 
 from osc_grimoire.config import VoiceRecognitionConfig
-from osc_grimoire.voice_features import extract_mfcc, extract_mfcc_from_array
+from osc_grimoire.voice_features import (
+    extract_mfcc,
+    extract_mfcc_from_array,
+    trim_voice_audio,
+)
 
 
 def _sine_wave(
@@ -43,3 +47,14 @@ def test_extract_mfcc_from_array_matches_wav(tmp_path: Path) -> None:
     assert from_wav.shape == from_array.shape
     # WAV round-trip introduces ~1e-2 float32 noise; coefficients are O(100).
     np.testing.assert_allclose(from_wav, from_array, atol=0.1)
+
+
+def test_trim_voice_audio_removes_leading_and_trailing_silence() -> None:
+    sr = 16000
+    silence = np.zeros(sr // 4, dtype=np.float32)
+    tone = _sine_wave(440.0, 0.5, sr)
+    audio = np.concatenate([silence, tone, silence])
+
+    trimmed = trim_voice_audio(audio, VoiceRecognitionConfig())
+
+    assert 0 < trimmed.size < audio.size

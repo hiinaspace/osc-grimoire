@@ -35,6 +35,7 @@ from .spellbook import (
     next_voice_sample_path,
     save_spellbook,
 )
+from .voice_features import trim_voice_audio
 from .voice_recognizer import (
     MFCC_DTW_BACKEND,
     SpellRanking,
@@ -541,6 +542,7 @@ def _cmd_record_negatives(
             if audio.size == 0:
                 print("  (no audio captured; skipping)")
                 continue
+            audio = trim_voice_audio(audio, config.voice)
             duration = audio.size / config.audio.sample_rate
             n = n_existing + i + 1
             path = out_dir / f"{args.prefix}_{n:03d}.wav"
@@ -649,6 +651,7 @@ def _save_calibration_clip(
     if audio.size == 0:
         print("  (no audio captured; skipping)")
         return None
+    audio = trim_voice_audio(audio, config.voice)
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), audio, config.audio.sample_rate)
     duration = audio.size / config.audio.sample_rate
@@ -1055,6 +1058,7 @@ def _record_samples(
             if audio.size == 0:
                 print("  (no audio captured; skipping)")
                 continue
+            audio = trim_voice_audio(audio, config.voice)
             duration = audio.size / config.audio.sample_rate
             current_spell = next(s for s in spellbook.spells if s.id == spell.id)
             wav_abs, wav_rel = next_voice_sample_path(spellbook, current_spell)

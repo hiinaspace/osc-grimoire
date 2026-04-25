@@ -31,7 +31,7 @@ from .spellbook import (
     voice_sample_abs_paths,
 )
 from .voice_embedding_backends import whisper_dtw_backend
-from .voice_features import FloatArray
+from .voice_features import FloatArray, trim_voice_audio
 from .voice_recognizer import (
     BackendStats,
     Decision,
@@ -160,6 +160,7 @@ class VoiceTrainingController:
         spell = self._spell_or_raise(spell_id)
         if audio.size == 0:
             raise ValueError("No audio captured")
+        audio = trim_voice_audio(audio, self.voice_config)
         path, relative_path = next_voice_sample_path(self.spellbook, spell)
         path.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(path), audio, self.config.audio.sample_rate)

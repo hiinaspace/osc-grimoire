@@ -11,7 +11,7 @@ import librosa
 import numpy as np
 
 from .config import VoiceRecognitionConfig
-from .voice_features import FloatArray
+from .voice_features import FloatArray, trim_voice_audio
 from .voice_recognizer import VoiceTemplateBackend
 
 LOGGER = logging.getLogger(__name__)
@@ -267,10 +267,7 @@ def _prepare_audio(
         audio = audio.mean(axis=1)
     if sample_rate != 16000:
         audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
-    trimmed, _ = librosa.effects.trim(audio, top_db=config.trim_top_db)
-    if trimmed.size == 0:
-        trimmed = audio
-    return trimmed.astype(np.float32)
+    return trim_voice_audio(audio, config)
 
 
 @functools.lru_cache(maxsize=4)

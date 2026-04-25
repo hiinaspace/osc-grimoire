@@ -143,6 +143,21 @@ def test_controller_updates_warm_feature_cache_incrementally(tmp_path: Path) -> 
     assert backend.extract_array_calls == 1
 
 
+def test_controller_trims_saved_voice_samples(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.persist_draft()
+    silence = np.zeros(4000, dtype=np.float32)
+    audio = np.concatenate([silence, _audio(440), silence])
+
+    updated = controller.add_sample_to_spell(spell.id, audio)
+
+    saved, sample_rate = sf.read(
+        str(tmp_path / updated.voice_samples[0]), dtype="float32"
+    )
+    assert sample_rate == 16000
+    assert 0 < saved.size < audio.size
+
+
 def test_controller_saves_and_overwrites_gesture_sample(tmp_path: Path) -> None:
     controller = _controller(
         tmp_path,

@@ -20,14 +20,7 @@ def extract_mfcc(
     audio, _ = librosa.load(str(wav_path), sr=sample_rate, mono=True)
     if audio.size == 0:
         raise ValueError(f"Empty audio in {wav_path}")
-    trimmed, _ = librosa.effects.trim(audio, top_db=config.trim_top_db)
-    if trimmed.size == 0:
-        LOGGER.warning(
-            "Audio in %s was entirely trimmed at top_db=%s; using untrimmed signal.",
-            wav_path,
-            config.trim_top_db,
-        )
-        trimmed = audio
+    trimmed = trim_voice_audio(audio, config)
     mfcc = librosa.feature.mfcc(y=trimmed, sr=sample_rate, n_mfcc=config.n_mfcc)
     if config.drop_mfcc_c0:
         mfcc = mfcc[1:]
@@ -41,14 +34,26 @@ def extract_mfcc_from_array(
 ) -> FloatArray:
     if audio.size == 0:
         raise ValueError("Empty audio array")
-    trimmed, _ = librosa.effects.trim(audio, top_db=config.trim_top_db)
-    if trimmed.size == 0:
-        trimmed = audio
+    trimmed = trim_voice_audio(audio, config)
     mfcc = librosa.feature.mfcc(y=trimmed, sr=sample_rate, n_mfcc=config.n_mfcc)
     if config.drop_mfcc_c0:
         mfcc = mfcc[1:]
     features = mfcc.T.astype(np.float32)
     return _normalize_cepstra(features) if config.cepstral_normalize else features
+
+
+def trim_voice_audio(audio: FloatArray, config: VoiceRecognitionConfig) -> FloatArray:
+    array = np.asarray(audio, dtype=np.float32)
+    if array.ndim > 1:
+        array = array.mean(axis=1).astype(np.float32)
+    trimmed, _ = librosa.effects.trim(array, top_db=config.trim_top_db)
+    if trimmed.size == 0:
+        LOGGER.debug(
+            "Audio was entirely trimmed at top_db=%s; using untrimmed signal.",
+            config.trim_top_db,
+        )
+        return array.astype(np.float32)
+    return trimmed.astype(np.float32)
 
 
 def _normalize_cepstra(features: FloatArray) -> FloatArray:
