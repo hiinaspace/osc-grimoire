@@ -18,5 +18,6 @@ data/
 
 # Local agent/editor settings
 .claude/settings.local.json
+OSC_Grimoire.ini
 
 .env

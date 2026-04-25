@@ -122,6 +122,31 @@ class DesktopVoiceUi:
         if spell is not None and not self.edit_name:
             self.edit_name = spell.name
 
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_prop
+            | imgui.TableFlags_.borders_inner_v
+            | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##spell_page_folio", 2, table_flags):
+            return
+        imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch, 0.58)
+        imgui.table_setup_column(
+            "Embedding", imgui.TableColumnFlags_.width_stretch, 0.42
+        )
+        imgui.table_next_row()
+        imgui.table_next_column()
+        self._draw_spell_controls(spell)
+        spell = self._selected_spell()
+        if spell is not None:
+            self._draw_samples(spell)
+        imgui.table_next_column()
+        imgui.text("Embedding PCA")
+        self._draw_embedding_plot()
+        imgui.end_table()
+
+    def _draw_spell_controls(self, spell: Spell | None) -> None:
+        from imgui_bundle import imgui
+
         changed, new_name = imgui.input_text("Spell name", self.edit_name)
         if changed:
             self.edit_name = new_name
@@ -156,11 +181,6 @@ class DesktopVoiceUi:
         self._hold_button("Hold to Record Sample (Space)", "sample", allow_space=True)
         imgui.same_line()
         self._hold_button("Hold to Test", "test", allow_space=False)
-        imgui.separator()
-        self._draw_embedding_plot()
-
-        if spell is not None:
-            self._draw_samples(spell)
 
     def _draw_samples(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -168,7 +188,17 @@ class DesktopVoiceUi:
         imgui.separator()
         imgui.text("Samples")
         previews = self._sample_previews(spell)
+        available_width = imgui.get_content_region_avail().x
+        columns = max(1, min(3, int(available_width // 190)))
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_same | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##sample_grid", columns, table_flags):
+            return
         for index, relative_path in enumerate(spell.voice_samples):
+            if index % columns == 0:
+                imgui.table_next_row()
+            imgui.table_next_column()
             imgui.push_id(str(index))
             if imgui.button("X"):
                 self.controller.delete_sample(spell.id, relative_path)
@@ -176,17 +206,17 @@ class DesktopVoiceUi:
                 imgui.pop_id()
                 break
             imgui.same_line()
-            imgui.text(Path(relative_path).name)
-            imgui.same_line()
             if index < len(previews):
+                graph_width = max(110.0, imgui.get_content_region_avail().x - 6.0)
                 imgui.plot_lines(
                     "##wave",
                     previews[index],
-                    graph_size=imgui.ImVec2(420, 48),
+                    graph_size=imgui.ImVec2(graph_width, 34),
                     scale_min=-1.0,
                     scale_max=1.0,
                 )
             imgui.pop_id()
+        imgui.end_table()
 
     def _draw_diagnostics_page(self) -> None:
         from imgui_bundle import imgui
@@ -349,7 +379,11 @@ class DesktopVoiceUi:
 
         imgui.text("Embedding PCA: spell samples are circles; latest attempt is X.")
         plot_flags = implot.Flags_.no_mouse_text
-        if implot.begin_plot("##embedding_pca", imgui.ImVec2(900, 260), plot_flags):
+        available_width = imgui.get_content_region_avail().x
+        plot_width = max(260.0, available_width)
+        if implot.begin_plot(
+            "##embedding_pca", imgui.ImVec2(plot_width, 260), plot_flags
+        ):
             axis_flags = implot.AxisFlags_.no_decorations
             implot.setup_axes("", "", axis_flags, axis_flags)
             self._plot_sample_points(points)
