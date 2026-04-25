@@ -41,6 +41,7 @@ class DesktopVoiceUi:
         self.page = PAGE_MAIN
         self.edit_name = ""
         self.recording_mode: str | None = None
+        self.recording_source: str | None = None
         self.recorder: NonBlockingAudioRecorder | None = None
         self.recorder_error: str | None = None
         self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
@@ -335,26 +336,41 @@ class DesktopVoiceUi:
         button_held = imgui.is_item_active()
         space_held = allow_space and imgui.is_key_down(imgui.Key.space)
         held = button_held or space_held
-        if held and self.recording_mode is None:
-            self._begin_recording(mode)
-        elif not held and self.recording_mode == mode:
-            self._finish_recording(mode)
+        self._update_hold_recording(mode, held)
 
-    def _begin_recording(self, mode: str) -> None:
+    def _update_hold_recording(self, mode: str, held: bool) -> None:
+        if held and self.recording_mode is None:
+            self._begin_recording(mode, "ui")
+        elif not held and self.recording_mode == mode and self.recording_source == "ui":
+            self._finish_recording(mode, "ui")
+
+    def begin_overlay_voice_recording(self) -> None:
+        if self.recording_mode is None:
+            self._begin_recording("recognize", "overlay")
+
+    def finish_overlay_voice_recording(self) -> None:
+        if self.recording_mode == "recognize" and self.recording_source == "overlay":
+            self._finish_recording("recognize", "overlay")
+
+    def _begin_recording(self, mode: str, source: str) -> None:
         recorder = self._ensure_recorder()
         if recorder is None:
             return
         recorder.begin_recording()
         self.recording_mode = mode
+        self.recording_source = source
         self.controller.status = f"Recording {mode}..."
 
-    def _finish_recording(self, mode: str) -> None:
+    def _finish_recording(self, mode: str, source: str) -> None:
         if self.recorder is None:
             return
         audio = self.recorder.end_recording()
         self.recording_mode = None
+        self.recording_source = None
         try:
             self._handle_recording(mode, audio)
+        except ValueError as exc:
+            self.controller.status = str(exc)
         except Exception as exc:
             LOGGER.exception("Recording action failed")
             self.controller.status = str(exc)

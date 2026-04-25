@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import logging
+import os
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,6 +26,7 @@ OVERLAY_KEY = "space.hiina.osc_grimoire.spellbook"
 OVERLAY_NAME = "OSC Grimoire Spellbook"
 TRAIL_OVERLAY_KEY = "space.hiina.osc_grimoire.gesture_trail"
 TRAIL_OVERLAY_NAME = "OSC Grimoire Gesture Trail"
+APP_KEY = "space.hiina.osc_grimoire"
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,55 @@ class OverlayMouseState:
 
 
 MouseEvent = tuple[str, tuple[float, float]] | tuple[str, bool]
+
+
+@dataclass(frozen=True)
+class OpenVrActionHandles:
+    action_set: int
+    right_trigger: int
+    right_grip: int
+    right_pose: int
+    right_source: int
+
+
+@dataclass(frozen=True)
+class OpenVrInputState:
+    trigger_down: bool
+    trigger_changed: bool
+    grip_down: bool
+    pose: Any | None
+
+
+def action_manifest_path() -> Path:
+    return Path(__file__).with_name("assets") / "actions.json"
+
+
+def ensure_application_manifest() -> Path:
+    manifest_dir = Path(tempfile.gettempdir()) / "osc-grimoire"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / "app.vrmanifest"
+    payload = {
+        "source": "builtin",
+        "applications": [
+            {
+                "app_key": APP_KEY,
+                "launch_type": "binary",
+                "binary_path_windows": sys.executable,
+                "working_directory": str(Path.cwd()),
+                "arguments": " ".join(sys.argv[1:]),
+                "action_manifest_path": str(action_manifest_path()),
+                "is_dashboard_overlay": False,
+                "strings": {
+                    "en_us": {
+                        "name": "OSC Grimoire",
+                        "description": "VR spellbook overlay for voice and gesture spell casting.",
+                    }
+                },
+            }
+        ],
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return manifest_path
 
 
 def uv_to_imgui(
@@ -195,12 +248,16 @@ class OpenVrOverlayRunner:
         self.openvr: Any = None
         self.vr_system: Any = None
         self.vr_overlay: Any = None
+        self.vr_input: Any = None
+        self.action_handles: OpenVrActionHandles | None = None
         self.overlay_handle: int | None = None
         self.trail_overlay_handle: int | None = None
         self.trail_texture: StrokeTrailTexture | None = None
         self.mouse_state = OverlayMouseState()
         self.gesture_sampler = GestureStrokeSampler(app.controller.config.gesture)
         self.grip_down = False
+        self.trigger_down = False
+        self.voice_trigger_down = False
         self._shutdown_openvr = False
 
     def run(self) -> None:
@@ -263,6 +320,9 @@ class OpenVrOverlayRunner:
             self._shutdown_openvr = True
             self.vr_system = openvr.VRSystem()
             self.vr_overlay = openvr.VROverlay()
+            self.vr_input = openvr.VRInput()
+            self._register_application_manifest()
+            self._configure_actions(action_manifest_path())
             self.overlay_handle = self.vr_overlay.createOverlay(
                 OVERLAY_KEY, OVERLAY_NAME
             )
@@ -292,6 +352,12 @@ class OpenVrOverlayRunner:
                 "updated, then retry `uv run osc-grimoire-overlay --data-dir ./data`."
             ) from exc
 
+    def _register_application_manifest(self) -> None:
+        assert self.openvr is not None
+        applications = self.openvr.VRApplications()
+        applications.addApplicationManifest(str(ensure_application_manifest()), True)
+        applications.identifyApplication(os.getpid(), APP_KEY)
+
     def _update_overlay_transform(self) -> None:
         assert self.openvr is not None
         assert self.vr_system is not None
@@ -311,59 +377,62 @@ class OpenVrOverlayRunner:
         assert self.vr_system is not None
         assert self.vr_overlay is not None
         assert self.overlay_handle is not None
-        device_index = self._pointer_device_index()
-        if device_index == self.openvr.k_unTrackedDeviceIndexInvalid:
+        input_state = self._input_state()
+        trigger_pressed = input_state.trigger_down and not self.trigger_down
+        trigger_released = not input_state.trigger_down and self.trigger_down
+        if input_state.pose is None:
+            if trigger_released and self.voice_trigger_down:
+                self.app.finish_overlay_voice_recording()
+                self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self.trigger_down = input_state.trigger_down
             return
 
-        state_ok, controller_state = self.vr_system.getControllerState(device_index)
-        trigger_down = bool(
-            state_ok
-            and is_trigger_pressed(
-                int(controller_state.ulButtonPressed),
-                int(self.openvr.k_EButton_SteamVR_Trigger),
-            )
-        )
-        grip_down = bool(
-            state_ok
-            and is_button_pressed(
-                int(controller_state.ulButtonPressed), int(self.openvr.k_EButton_Grip)
-            )
-        )
         poses = self._tracked_device_poses()
         if poses is None:
             self.app.controller.status = "Waiting for controller tracking..."
-            self._apply_mouse_events(
-                hovering=False, trigger_down=trigger_down, position=None
-            )
+            if trigger_released and self.voice_trigger_down:
+                self.app.finish_overlay_voice_recording()
+                self.voice_trigger_down = False
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self.trigger_down = input_state.trigger_down
             return
-        pose = poses[device_index]
-        if not pose.bPoseIsValid:
-            self._apply_mouse_events(
-                hovering=False, trigger_down=trigger_down, position=None
-            )
-            self._update_gesture_capture(False, poses, device_index)
+        if not input_state.pose.bPoseIsValid:
+            if trigger_released and self.voice_trigger_down:
+                self.app.finish_overlay_voice_recording()
+                self.voice_trigger_down = False
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self._update_gesture_capture(False, poses, input_state.pose)
+            self.trigger_down = input_state.trigger_down
             return
-        self._update_gesture_capture(grip_down, poses, device_index)
-        ray = ray_from_pose(pose)
+        self._update_gesture_capture(input_state.grip_down, poses, input_state.pose)
+        ray = ray_from_pose(input_state.pose)
         intersection = self._compute_intersection(ray)
-        if intersection is None:
-            self._apply_mouse_events(
-                hovering=False, trigger_down=trigger_down, position=None
-            )
+        if self.voice_trigger_down:
+            self._update_overlay_voice_recording(trigger_pressed, trigger_released)
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self.trigger_down = input_state.trigger_down
             return
+        if intersection is None:
+            self._update_overlay_voice_recording(trigger_pressed, trigger_released)
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self.trigger_down = input_state.trigger_down
+            return
+        if trigger_released and self.voice_trigger_down:
+            self.app.finish_overlay_voice_recording()
+            self.voice_trigger_down = False
         self._apply_mouse_events(
             hovering=True,
-            trigger_down=trigger_down,
+            trigger_down=input_state.trigger_down,
             position=intersection,
         )
+        self.trigger_down = input_state.trigger_down
 
     def _update_gesture_capture(
-        self, grip_down: bool, poses: Any, pointer_device_index: int
+        self, grip_down: bool, poses: Any, pointer_pose: Any
     ) -> None:
         assert self.openvr is not None
         hmd_pose = poses[self.openvr.k_unTrackedDeviceIndex_Hmd]
-        pointer_pose = poses[pointer_device_index]
         if grip_down and not self.grip_down:
             if not hmd_pose.bPoseIsValid or not pointer_pose.bPoseIsValid:
                 self.app.controller.status = "Waiting for gesture tracking..."
@@ -390,6 +459,82 @@ class OpenVrOverlayRunner:
                 LOGGER.exception("Gesture action failed")
                 self.app.controller.status = str(exc)
         self.grip_down = grip_down
+
+    def _update_overlay_voice_recording(
+        self, trigger_pressed: bool, trigger_released: bool
+    ) -> None:
+        if trigger_pressed:
+            self.app.begin_overlay_voice_recording()
+            self.voice_trigger_down = True
+        elif trigger_released and self.voice_trigger_down:
+            self.app.finish_overlay_voice_recording()
+            self.voice_trigger_down = False
+
+    def _configure_actions(self, manifest_path: Path) -> None:
+        assert self.vr_input is not None
+        self.vr_input.setActionManifestPath(str(manifest_path))
+        self.action_handles = OpenVrActionHandles(
+            action_set=self.vr_input.getActionSetHandle("/actions/main"),
+            right_trigger=self.vr_input.getActionHandle(
+                "/actions/main/in/right_trigger"
+            ),
+            right_grip=self.vr_input.getActionHandle("/actions/main/in/right_grip"),
+            right_pose=self.vr_input.getActionHandle("/actions/main/in/right_pose"),
+            right_source=self.vr_input.getInputSourceHandle("/user/hand/right"),
+        )
+
+    def _input_state(self) -> OpenVrInputState:
+        self._update_action_state()
+        digital_data = self._digital_action_data("right_trigger")
+        return OpenVrInputState(
+            trigger_down=bool(digital_data.bActive and digital_data.bState),
+            trigger_changed=bool(digital_data.bActive and digital_data.bChanged),
+            grip_down=self._digital_action_state("right_grip"),
+            pose=self._right_pose_action(),
+        )
+
+    def _update_action_state(self) -> None:
+        assert self.openvr is not None
+        assert self.vr_input is not None
+        assert self.action_handles is not None
+        action_set = self.openvr.VRActiveActionSet_t()
+        action_set.ulActionSet = self.action_handles.action_set
+        action_set.ulRestrictedToDevice = self.openvr.k_ulInvalidInputValueHandle
+        action_set.ulSecondaryActionSet = self.openvr.k_ulInvalidActionHandle
+        action_set.nPriority = 0
+        sets = (self.openvr.VRActiveActionSet_t * 1)()
+        sets[0] = action_set
+        self.vr_input.updateActionState(sets)
+
+    def _digital_action_state(self, name: str) -> bool:
+        data = self._digital_action_data(name)
+        return bool(data.bActive and data.bState)
+
+    def _digital_action_changed(self, name: str) -> bool:
+        data = self._digital_action_data(name)
+        return bool(data.bActive and data.bChanged)
+
+    def _digital_action_data(self, name: str) -> Any:
+        assert self.openvr is not None
+        assert self.vr_input is not None
+        assert self.action_handles is not None
+        handle = getattr(self.action_handles, name)
+        return self.vr_input.getDigitalActionData(
+            handle, self.action_handles.right_source
+        )
+
+    def _right_pose_action(self) -> Any | None:
+        assert self.openvr is not None
+        assert self.vr_input is not None
+        assert self.action_handles is not None
+        pose_data = self.vr_input.getPoseActionDataForNextFrame(
+            self.action_handles.right_pose,
+            self.openvr.TrackingUniverseStanding,
+            self.action_handles.right_source,
+        )
+        if pose_data.bActive and pose_data.pose.bPoseIsValid:
+            return pose_data.pose
+        return self._fallback_pointer_pose()
 
     def _show_gesture_trail(self) -> None:
         assert self.vr_overlay is not None
@@ -503,6 +648,16 @@ class OpenVrOverlayRunner:
 
     def _pointer_device_index(self) -> int:
         return self._device_index_for_hand(self.config.pointer_hand)
+
+    def _fallback_pointer_pose(self) -> Any | None:
+        device_index = self._pointer_device_index()
+        if device_index == self.openvr.k_unTrackedDeviceIndexInvalid:
+            return None
+        poses = self._tracked_device_poses()
+        if poses is None:
+            return None
+        pose = poses[device_index]
+        return pose if pose.bPoseIsValid else None
 
     def _device_index_for_hand(self, hand: str) -> int:
         assert self.openvr is not None

@@ -1,0 +1,37 @@
+{
+  "action_manifest_version": 0,
+  "category": "steamvr_input",
+  "controller_type": "vive_controller",
+  "description": "Default OSC Grimoire bindings for Vive wands.",
+  "name": "OSC Grimoire Vive",
+  "bindings": {
+    "/actions/main": {
+      "poses": [
+        {
+          "output": "/actions/main/in/right_pose",
+          "path": "/user/hand/right/pose/tip"
+        }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/right_trigger"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/main/in/right_grip"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

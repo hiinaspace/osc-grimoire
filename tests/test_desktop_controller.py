@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -233,6 +234,31 @@ def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> 
     assert not ui._can_edit_spell_names()
 
 
+def test_desktop_ui_button_release_does_not_end_overlay_recording(
+    tmp_path: Path,
+) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    recorder = _FakeRecorder()
+    ui.recorder = cast("Any", recorder)
+
+    ui.begin_overlay_voice_recording()
+    ui._update_hold_recording("recognize", held=False)
+
+    assert ui.recording_mode == "recognize"
+    assert ui.recording_source == "overlay"
+    assert recorder.begin_count == 1
+    assert recorder.end_count == 0
+
+    ui.finish_overlay_voice_recording()
+
+    assert ui.recording_mode is None
+    assert ui.recording_source is None
+    assert recorder.end_count == 1
+
+
 def _controller(
     data_dir: Path, gesture_config: GestureRecognitionConfig | None = None
 ) -> VoiceTrainingController:
@@ -246,6 +272,19 @@ def _controller(
         backend=_fake_backend(),
         voice_config=VoiceRecognitionConfig(relative_margin_min=0.0),
     )
+
+
+class _FakeRecorder:
+    def __init__(self) -> None:
+        self.begin_count = 0
+        self.end_count = 0
+
+    def begin_recording(self) -> None:
+        self.begin_count += 1
+
+    def end_recording(self) -> FloatArray:
+        self.end_count += 1
+        return np.zeros(1600, dtype=np.float32)
 
 
 def _fake_backend() -> VoiceTemplateBackend:

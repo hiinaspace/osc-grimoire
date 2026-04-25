@@ -1,0 +1,42 @@
+{
+  "action_manifest_version": 0,
+  "action_sets": [
+    {
+      "name": "/actions/main",
+      "usage": "leftright"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/main/in/right_trigger",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/right_grip",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/right_pose",
+      "type": "pose"
+    }
+  ],
+  "default_bindings": [
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    },
+    {
+      "controller_type": "vive_controller",
+      "binding_url": "bindings_vive_controller.json"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/main": "OSC Grimoire",
+      "/actions/main/in/right_trigger": "Point / Speak",
+      "/actions/main/in/right_grip": "Gesture",
+      "/actions/main/in/right_pose": "Right Controller Pose"
+    }
+  ]
+}

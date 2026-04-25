@@ -8,8 +8,11 @@ import pytest
 from osc_grimoire.config import GestureRecognitionConfig, OpenVrOverlayConfig
 from osc_grimoire.desktop_ui import DesktopVoiceUi
 from osc_grimoire.openvr_overlay import (
+    APP_KEY,
+    OpenVrInputState,
     OpenVrOverlayRunner,
     OverlayMouseState,
+    ensure_application_manifest,
     is_button_pressed,
     is_trigger_pressed,
     next_mouse_events,
@@ -100,6 +103,16 @@ def test_openvr_overlay_import_smoke() -> None:
     assert openvr_overlay.OVERLAY_KEY == "space.hiina.osc_grimoire.spellbook"
 
 
+def test_application_manifest_registers_action_manifest() -> None:
+    path = ensure_application_manifest()
+
+    payload = path.read_text(encoding="utf-8")
+
+    assert APP_KEY in payload
+    assert "action_manifest_path" in payload
+    assert "actions.json" in payload
+
+
 def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = OpenVrOverlayRunner(
         cast(DesktopVoiceUi, _FakeApp()), OpenVrOverlayConfig()
@@ -113,6 +126,16 @@ def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) ->
         runner,
         "_apply_mouse_events",
         lambda **kwargs: applied.append(kwargs),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_input_state",
+        lambda: OpenVrInputState(
+            trigger_down=False,
+            trigger_changed=False,
+            grip_down=False,
+            pose=_FakePose(_matrix((0, 0, 0))),
+        ),
     )
     monkeypatch.setattr(runner, "_tracked_device_poses", lambda: None)
 
@@ -130,12 +153,113 @@ def test_runner_routes_grip_stroke_to_controller() -> None:
     runner.vr_overlay = _FakeOverlay()
     runner.trail_overlay_handle = 456
 
-    runner._update_gesture_capture(True, poses, 1)
-    runner._update_gesture_capture(False, poses, 1)
+    runner._update_gesture_capture(True, poses, poses[1])
+    runner._update_gesture_capture(False, poses, poses[1])
 
     assert app.controller.gesture_count == 1
     assert runner.vr_overlay.shown == [456]
     assert runner.vr_overlay.hidden == [456]
+
+
+def test_trigger_off_overlay_records_voice_not_mouse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    applied = []
+    monkeypatch.setattr(
+        runner,
+        "_input_state",
+        lambda: OpenVrInputState(
+            trigger_down=True,
+            trigger_changed=True,
+            grip_down=False,
+            pose=poses[1],
+        ),
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(
+        runner,
+        "_apply_mouse_events",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    runner._inject_controller_input()
+
+    assert app.voice_begin_count == 1
+    assert app.voice_finish_count == 0
+    assert runner.voice_trigger_down
+    assert applied == [{"hovering": False, "trigger_down": False, "position": None}]
+
+
+def test_trigger_changed_without_pressed_state_does_not_finish_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    monkeypatch.setattr(
+        runner,
+        "_input_state",
+        lambda: OpenVrInputState(
+            trigger_down=False,
+            trigger_changed=True,
+            grip_down=False,
+            pose=poses[1],
+        ),
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(runner, "_apply_mouse_events", lambda **_kwargs: None)
+
+    runner._inject_controller_input()
+
+    assert app.voice_begin_count == 0
+    assert app.voice_finish_count == 0
+    assert not runner.voice_trigger_down
+
+
+def test_trigger_off_overlay_finishes_voice_on_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    runner.trigger_down = True
+    runner.voice_trigger_down = True
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    monkeypatch.setattr(
+        runner,
+        "_input_state",
+        lambda: OpenVrInputState(
+            trigger_down=False,
+            trigger_changed=True,
+            grip_down=False,
+            pose=poses[1],
+        ),
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(runner, "_apply_mouse_events", lambda **_kwargs: None)
+
+    runner._inject_controller_input()
+
+    assert app.voice_begin_count == 0
+    assert app.voice_finish_count == 1
+    assert not runner.voice_trigger_down
 
 
 class _FakeController:
@@ -152,6 +276,14 @@ class _FakeController:
 class _FakeApp:
     def __init__(self) -> None:
         self.controller = _FakeController()
+        self.voice_begin_count = 0
+        self.voice_finish_count = 0
+
+    def begin_overlay_voice_recording(self) -> None:
+        self.voice_begin_count += 1
+
+    def finish_overlay_voice_recording(self) -> None:
+        self.voice_finish_count += 1
 
 
 class _FakeOpenVr:
