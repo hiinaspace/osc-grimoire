@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from osc_grimoire.calibration import CalibrationReport, ThresholdSweepResult
-from osc_grimoire.cli import _print_calibration_comparison
+from osc_grimoire.cli import _print_calibration_comparison, _resolve_diagnose_backends
 
 
 def _report(name: str, hits: int, false_accepts: int) -> CalibrationReport:
@@ -42,3 +42,13 @@ def test_print_calibration_comparison_includes_each_backend(capsys) -> None:
     assert "8/15 hits" in output
     assert "13/15 hits" in output
     assert "123 MiB" in output
+
+
+def test_resolve_conformer_backend_name_without_loading_model() -> None:
+    backend = _resolve_diagnose_backends("conformer-dtw", None)[0]
+    assert backend.name.startswith("conformer-dtw:")
+
+
+def test_resolve_w2vbert_backend_name_without_loading_model() -> None:
+    backend = _resolve_diagnose_backends("w2vbert-mean", None)[0]
+    assert backend.name.startswith("w2vbert-mean:")

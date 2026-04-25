@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ from .voice_recognizer import VoiceTemplateBackend
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL = "microsoft/wavlm-base-plus"
+DEFAULT_CONFORMER_MODEL = "facebook/wav2vec2-conformer-rel-pos-large"
+DEFAULT_WAV2VEC2_BERT_MODEL = "facebook/w2v-bert-2.0"
 
 
 class MissingEmbeddingDependenciesError(RuntimeError):
@@ -40,8 +43,42 @@ def missing_embedding_dependencies_message() -> str:
 def wavlm_dtw_backend(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> VoiceTemplateBackend:
+    return hf_frame_dtw_backend("wavlm-dtw", model_name)
+
+
+def wavlm_mean_backend(
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+) -> VoiceTemplateBackend:
+    return hf_mean_backend("wavlm-mean", model_name)
+
+
+def conformer_dtw_backend(
+    model_name: str = DEFAULT_CONFORMER_MODEL,
+) -> VoiceTemplateBackend:
+    return hf_frame_dtw_backend("conformer-dtw", model_name)
+
+
+def conformer_mean_backend(
+    model_name: str = DEFAULT_CONFORMER_MODEL,
+) -> VoiceTemplateBackend:
+    return hf_mean_backend("conformer-mean", model_name)
+
+
+def wav2vec2_bert_dtw_backend(
+    model_name: str = DEFAULT_WAV2VEC2_BERT_MODEL,
+) -> VoiceTemplateBackend:
+    return hf_frame_dtw_backend("w2vbert-dtw", model_name)
+
+
+def wav2vec2_bert_mean_backend(
+    model_name: str = DEFAULT_WAV2VEC2_BERT_MODEL,
+) -> VoiceTemplateBackend:
+    return hf_mean_backend("w2vbert-mean", model_name)
+
+
+def hf_frame_dtw_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
     return VoiceTemplateBackend(
-        name=_backend_name("wavlm-dtw", model_name),
+        name=_backend_name(kind, model_name),
         extract_path=lambda path, config: _extract_frame_embeddings_from_path(
             path, config, model_name
         ),
@@ -53,11 +90,9 @@ def wavlm_dtw_backend(
     )
 
 
-def wavlm_mean_backend(
-    model_name: str = DEFAULT_EMBEDDING_MODEL,
-) -> VoiceTemplateBackend:
+def hf_mean_backend(kind: str, model_name: str) -> VoiceTemplateBackend:
     return VoiceTemplateBackend(
-        name=_backend_name("wavlm-mean", model_name),
+        name=_backend_name(kind, model_name),
         extract_path=lambda path, config: _extract_mean_embedding_from_path(
             path, config, model_name
         ),
@@ -150,9 +185,10 @@ def _load_model(model_name: str) -> EmbeddingModelBundle:
             missing_embedding_dependencies_message()
         ) from exc
 
+    token = _huggingface_token()
     LOGGER.info("Loading embedding model %s", model_name)
-    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name)
+    feature_extractor = AutoFeatureExtractor.from_pretrained(model_name, token=token)
+    model = AutoModel.from_pretrained(model_name, token=token)
     model.eval()
     return EmbeddingModelBundle(
         model_name=model_name,
@@ -160,6 +196,23 @@ def _load_model(model_name: str) -> EmbeddingModelBundle:
         model=model,
         torch=torch,
     )
+
+
+def _huggingface_token() -> str | None:
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        return token
+    env_path = Path(".env")
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() == "HF_TOKEN":
+            return value.strip().strip('"').strip("'")
+    return None
 
 
 def _l2_normalize(features: FloatArray) -> FloatArray:

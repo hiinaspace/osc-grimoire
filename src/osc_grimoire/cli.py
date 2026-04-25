@@ -182,7 +182,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument(
         "--backend",
         default="mfcc-dtw",
-        choices=["mfcc-dtw", "wavlm-dtw", "wavlm-mean", "all"],
+        choices=[
+            "mfcc-dtw",
+            "wavlm-dtw",
+            "wavlm-mean",
+            "conformer-dtw",
+            "conformer-mean",
+            "w2vbert-dtw",
+            "w2vbert-mean",
+            "all",
+        ],
         help="Recognizer backend to evaluate (default: mfcc-dtw).",
     )
     p_diag.add_argument(
@@ -659,12 +668,26 @@ def _resolve_diagnose_backends(
     if backend_name == "mfcc-dtw":
         return [MFCC_DTW_BACKEND]
 
-    if backend_name in {"wavlm-dtw", "wavlm-mean", "all"}:
+    if backend_name in {
+        "wavlm-dtw",
+        "wavlm-mean",
+        "conformer-dtw",
+        "conformer-mean",
+        "w2vbert-dtw",
+        "w2vbert-mean",
+        "all",
+    }:
         try:
             from .voice_embedding_backends import (
+                DEFAULT_CONFORMER_MODEL,
                 DEFAULT_EMBEDDING_MODEL,
+                DEFAULT_WAV2VEC2_BERT_MODEL,
                 MissingEmbeddingDependenciesError,
+                conformer_dtw_backend,
+                conformer_mean_backend,
                 missing_embedding_dependencies_message,
+                wav2vec2_bert_dtw_backend,
+                wav2vec2_bert_mean_backend,
                 wavlm_dtw_backend,
                 wavlm_mean_backend,
             )
@@ -674,16 +697,33 @@ def _resolve_diagnose_backends(
                 "Run `uv sync --group ml`, then retry."
             ) from exc
 
-        model = embedding_model or DEFAULT_EMBEDDING_MODEL
         if backend_name == "wavlm-dtw":
+            model = embedding_model or DEFAULT_EMBEDDING_MODEL
             return [wavlm_dtw_backend(model)]
         if backend_name == "wavlm-mean":
+            model = embedding_model or DEFAULT_EMBEDDING_MODEL
             return [wavlm_mean_backend(model)]
+        if backend_name == "conformer-dtw":
+            model = embedding_model or DEFAULT_CONFORMER_MODEL
+            return [conformer_dtw_backend(model)]
+        if backend_name == "conformer-mean":
+            model = embedding_model or DEFAULT_CONFORMER_MODEL
+            return [conformer_mean_backend(model)]
+        if backend_name == "w2vbert-dtw":
+            model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
+            return [wav2vec2_bert_dtw_backend(model)]
+        if backend_name == "w2vbert-mean":
+            model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
+            return [wav2vec2_bert_mean_backend(model)]
         try:
             return [
                 MFCC_DTW_BACKEND,
-                wavlm_dtw_backend(model),
-                wavlm_mean_backend(model),
+                wavlm_dtw_backend(DEFAULT_EMBEDDING_MODEL),
+                wavlm_mean_backend(DEFAULT_EMBEDDING_MODEL),
+                conformer_dtw_backend(DEFAULT_CONFORMER_MODEL),
+                conformer_mean_backend(DEFAULT_CONFORMER_MODEL),
+                wav2vec2_bert_dtw_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
+                wav2vec2_bert_mean_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
             ]
         except MissingEmbeddingDependenciesError as exc:
             raise RuntimeError(missing_embedding_dependencies_message()) from exc
