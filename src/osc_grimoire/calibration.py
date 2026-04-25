@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import VoiceRecognitionConfig
 from .spellbook import Spellbook
+from .voice_features import FloatArray
 from .voice_recognizer import (
     MFCC_DTW_BACKEND,
+    BackendStats,
     VoiceTemplateBackend,
+    compute_backend_stats,
     decide,
     rank_spells,
 )
@@ -34,6 +38,8 @@ class ExampleDiagnosis:
     intra_ratio: float | None
     margin_ratio: float | None
     reason: str
+    extraction_seconds: float = 0.0
+    peak_rss_mb: float | None = None
 
 
 @dataclass(frozen=True)
@@ -54,9 +60,12 @@ class ThresholdSweepResult:
 @dataclass(frozen=True)
 class CalibrationReport:
     session_dir: Path
+    backend_name: str
     examples: tuple[ExampleDiagnosis, ...]
     sweep: tuple[ThresholdSweepResult, ...]
     recommended_margin_min: float | None
+    extraction_seconds: float = 0.0
+    peak_rss_mb: float | None = None
 
 
 def write_calibration_metadata(
@@ -115,11 +124,41 @@ def diagnose_calibration_session(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
     backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
-    margin_values: tuple[float, ...] = (0.00, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20),
+    margin_values: tuple[float, ...] = (
+        0.00,
+        0.03,
+        0.05,
+        0.07,
+        0.10,
+        0.15,
+        0.20,
+        0.25,
+        0.30,
+        0.40,
+        0.50,
+    ),
 ) -> CalibrationReport:
     examples = load_calibration_examples(session_dir)
+    peak_rss_mb = _current_rss_mb()
+    backend_stats, feature_cache = compute_backend_stats(spellbook, config, backend)
+    peak_rss_mb = _max_optional(peak_rss_mb, _current_rss_mb())
     diagnoses = tuple(
-        _diagnose_example(example, spellbook, config, backend) for example in examples
+        _diagnose_example(
+            example,
+            spellbook,
+            config,
+            backend,
+            backend_stats,
+            feature_cache,
+        )
+        for example in examples
+    )
+    peak_rss_mb = _max_optional(
+        peak_rss_mb,
+        max(
+            (d.peak_rss_mb for d in diagnoses if d.peak_rss_mb is not None),
+            default=None,
+        ),
     )
     sweep = tuple(
         _sweep_threshold(margin_min, diagnoses, config) for margin_min in margin_values
@@ -127,9 +166,13 @@ def diagnose_calibration_session(
     recommended = _recommend_margin(sweep)
     return CalibrationReport(
         session_dir=session_dir,
+        backend_name=backend.name,
         examples=diagnoses,
         sweep=sweep,
         recommended_margin_min=recommended,
+        extraction_seconds=backend_stats.extraction_seconds
+        + sum(d.extraction_seconds for d in diagnoses),
+        peak_rss_mb=peak_rss_mb,
     )
 
 
@@ -138,9 +181,20 @@ def _diagnose_example(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
     backend: VoiceTemplateBackend,
+    backend_stats: BackendStats,
+    feature_cache: dict[Path, FloatArray],
 ) -> ExampleDiagnosis:
+    start = time.perf_counter()
     query = backend.extract_path(example.path, config)
-    ranking = rank_spells(query, spellbook, config, backend=backend)
+    extraction_seconds = time.perf_counter() - start
+    ranking = rank_spells(
+        query,
+        spellbook,
+        config,
+        feature_cache,
+        backend=backend,
+        backend_stats=backend_stats,
+    )
     decision = decide(ranking, config)
     best = ranking[0] if ranking else None
     correct: bool | None
@@ -157,6 +211,8 @@ def _diagnose_example(
         intra_ratio=decision.intra_ratio,
         margin_ratio=decision.margin_ratio,
         reason=decision.reason,
+        extraction_seconds=extraction_seconds,
+        peak_rss_mb=_current_rss_mb(),
     )
 
 
@@ -218,3 +274,20 @@ def _recommend_margin(sweep: tuple[ThresholdSweepResult, ...]) -> float | None:
         return None
     viable.sort(key=lambda r: (-r.positive_correct, r.false_rejects, -r.margin_min))
     return viable[0].margin_min
+
+
+def _current_rss_mb() -> float | None:
+    try:
+        import psutil
+    except ImportError:
+        return None
+    process = psutil.Process()
+    return process.memory_info().rss / (1024 * 1024)
+
+
+def _max_optional(a: float | None, b: float | None) -> float | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)

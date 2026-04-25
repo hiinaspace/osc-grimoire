@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import statistics
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import combinations
@@ -60,6 +61,12 @@ class SpellRanking:
 
 
 @dataclass(frozen=True)
+class BackendStats:
+    intra_class_medians: dict[str, float | None]
+    extraction_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class Decision:
     accepted: bool
     reason: str
@@ -89,6 +96,7 @@ def rank_spells(
     config: VoiceRecognitionConfig,
     feature_cache: dict[Path, FloatArray] | None = None,
     backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    backend_stats: BackendStats | None = None,
 ) -> list[SpellRanking]:
     rankings: list[SpellRanking] = []
     for spell in spellbook.spells:
@@ -108,11 +116,19 @@ def rank_spells(
                 name=spell.name,
                 aggregate_distance=backend.aggregate(per_sample),
                 per_sample_distances=tuple(per_sample),
-                intra_class_median=spell.intra_class_median,
+                intra_class_median=_intra_class_median_for(spell, backend_stats),
             )
         )
     rankings.sort(key=lambda r: r.aggregate_distance)
     return rankings
+
+
+def _intra_class_median_for(
+    spell: Spell, backend_stats: BackendStats | None
+) -> float | None:
+    if backend_stats is None:
+        return spell.intra_class_median
+    return backend_stats.intra_class_medians.get(spell.id)
 
 
 def decide(
@@ -242,6 +258,31 @@ def recompute_all(
             spellbook, spell, config, feature_cache, backend
         )
     return spellbook
+
+
+def compute_backend_stats(
+    spellbook: Spellbook,
+    config: VoiceRecognitionConfig,
+    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+) -> tuple[BackendStats, dict[Path, FloatArray]]:
+    feature_cache: dict[Path, FloatArray] = {}
+    intra_class_medians: dict[str, float | None] = {}
+    extraction_seconds = 0.0
+    for spell in spellbook.spells:
+        if not spell.has_voice or not spell.voice_samples:
+            continue
+        features: list[FloatArray] = []
+        for path in voice_sample_abs_paths(spellbook, spell):
+            if not path.exists():
+                LOGGER.warning("Sample missing on disk: %s", path)
+                continue
+            if path not in feature_cache:
+                start = time.perf_counter()
+                feature_cache[path] = backend.extract_path(path, config)
+                extraction_seconds += time.perf_counter() - start
+            features.append(feature_cache[path])
+        intra_class_medians[spell.id] = compute_intra_class_median(features, backend)
+    return BackendStats(intra_class_medians, extraction_seconds), feature_cache
 
 
 def leave_one_out_eval(

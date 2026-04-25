@@ -37,6 +37,7 @@ from .spellbook import (
 from .voice_recognizer import (
     MFCC_DTW_BACKEND,
     SpellRanking,
+    VoiceTemplateBackend,
     decide,
     leave_one_out_eval,
     rank_spells,
@@ -177,6 +178,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--session",
         default=None,
         help="Calibration session directory (default: latest under data-dir).",
+    )
+    p_diag.add_argument(
+        "--backend",
+        default="mfcc-dtw",
+        choices=["mfcc-dtw", "wavlm-dtw", "wavlm-mean", "all"],
+        help="Recognizer backend to evaluate (default: mfcc-dtw).",
+    )
+    p_diag.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Hugging Face model for WavLM/HuBERT backends.",
+    )
+    p_diag.add_argument(
+        "--plot-dir",
+        default=None,
+        help="Write ROC and performance plots to this directory.",
     )
 
     return parser
@@ -564,7 +581,9 @@ def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) 
                 examples.append(example)
 
     write_calibration_metadata(session_dir, examples)
-    report = diagnose_calibration_session(session_dir, spellbook, config.voice)
+    report = diagnose_calibration_session(
+        session_dir, spellbook, config.voice, MFCC_DTW_BACKEND
+    )
     _print_calibration_report(report)
     return 0
 
@@ -605,16 +624,81 @@ def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -
         print("No calibration session found. Run `osc-grimoire calibrate` first.")
         return 1
 
-    spellbook = recompute_all(spellbook, config.voice)
-    save_spellbook(spellbook)
-    report = diagnose_calibration_session(session_dir, spellbook, config.voice)
-    _print_calibration_report(report)
+    try:
+        backends = _resolve_diagnose_backends(args.backend, args.embedding_model)
+        reports = [
+            diagnose_calibration_session(session_dir, spellbook, config.voice, backend)
+            for backend in backends
+        ]
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if len(reports) == 1:
+        _print_calibration_report(reports[0])
+    else:
+        _print_calibration_comparison(reports)
+    if args.plot_dir:
+        try:
+            from .diagnostic_plots import write_diagnostic_plots
+
+            paths = write_diagnostic_plots(reports, Path(args.plot_dir))
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print()
+        print("Wrote diagnostic plots:")
+        for path in paths:
+            print(f"  {path}")
     return 0
+
+
+def _resolve_diagnose_backends(
+    backend_name: str, embedding_model: str | None
+) -> list[VoiceTemplateBackend]:
+    if backend_name == "mfcc-dtw":
+        return [MFCC_DTW_BACKEND]
+
+    if backend_name in {"wavlm-dtw", "wavlm-mean", "all"}:
+        try:
+            from .voice_embedding_backends import (
+                DEFAULT_EMBEDDING_MODEL,
+                MissingEmbeddingDependenciesError,
+                missing_embedding_dependencies_message,
+                wavlm_dtw_backend,
+                wavlm_mean_backend,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "Embedding backend module could not be imported. "
+                "Run `uv sync --group ml`, then retry."
+            ) from exc
+
+        model = embedding_model or DEFAULT_EMBEDDING_MODEL
+        if backend_name == "wavlm-dtw":
+            return [wavlm_dtw_backend(model)]
+        if backend_name == "wavlm-mean":
+            return [wavlm_mean_backend(model)]
+        try:
+            return [
+                MFCC_DTW_BACKEND,
+                wavlm_dtw_backend(model),
+                wavlm_mean_backend(model),
+            ]
+        except MissingEmbeddingDependenciesError as exc:
+            raise RuntimeError(missing_embedding_dependencies_message()) from exc
+
+    raise RuntimeError(f"Unknown backend {backend_name!r}")
 
 
 def _print_calibration_report(report: CalibrationReport) -> None:
     print()
     print(f"Diagnosis for {report.session_dir}")
+    print(
+        f"Backend: {report.backend_name}  "
+        f"feature extraction: {report.extraction_seconds:.2f}s  "
+        f"rss: {_rss_repr(report)}"
+    )
     positives = [d for d in report.examples if d.example.kind == "positive"]
     negatives = [d for d in report.examples if d.example.kind == "negative"]
     positive_hits = sum(1 for d in positives if d.accepted and d.correct)
@@ -668,6 +752,50 @@ def _print_calibration_report(report: CalibrationReport) -> None:
             f"{report.recommended_margin_min:.2f} "
             "(best zero-false-accept point in this session)."
         )
+
+
+def _print_calibration_comparison(reports: list[CalibrationReport]) -> None:
+    print()
+    print(f"Diagnosis for {reports[0].session_dir}")
+    print("Backend comparison:")
+    for report in reports:
+        positives = [d for d in report.examples if d.example.kind == "positive"]
+        negatives = [d for d in report.examples if d.example.kind == "negative"]
+        positive_hits = sum(1 for d in positives if d.accepted and d.correct)
+        negative_false_accepts = sum(1 for d in negatives if d.accepted)
+        recommended = (
+            f"{report.recommended_margin_min:.2f}"
+            if report.recommended_margin_min is not None
+            else "none"
+        )
+        print(
+            f"  {report.backend_name}: current hits "
+            f"{positive_hits}/{len(positives)}, false accepts "
+            f"{negative_false_accepts}/{len(negatives)}, "
+            f"recommended margin {recommended}, "
+            f"features {report.extraction_seconds:.2f}s, "
+            f"rss {_rss_repr(report)}"
+        )
+
+    print()
+    print("Margin threshold sweep:")
+    margin_values = [row.margin_min for row in reports[0].sweep]
+    for margin in margin_values:
+        parts = []
+        for report in reports:
+            row = next(r for r in report.sweep if r.margin_min == margin)
+            parts.append(
+                f"{report.backend_name}: "
+                f"{row.positive_correct}/{row.positive_total} hits, "
+                f"{row.negative_accepted}/{row.negative_total} FA"
+            )
+        print(f"  margin>={margin:>4.2f}: " + " | ".join(parts))
+
+
+def _rss_repr(report: CalibrationReport) -> str:
+    if report.peak_rss_mb is None:
+        return "n/a"
+    return f"{report.peak_rss_mb:.0f} MiB"
 
 
 def _record_samples(

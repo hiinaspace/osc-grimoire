@@ -29,6 +29,13 @@ build-backend = "uv_build"
 dev = [
     "pytest>=8.4.0",
     "ruff>=0.15.0",
+    "ty>=0.0.1a22",
+]
+ml = [
+    "matplotlib>=3.10.0",
+    "psutil>=7.0.0",
+    "torch>=2.9.0",
+    "transformers>=4.57.0",
 ]
 
 [tool.ruff]
