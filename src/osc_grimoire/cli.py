@@ -5,7 +5,7 @@ import logging
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +44,15 @@ from .voice_recognizer import (
     recompute_all,
     recompute_spell_voice_stats,
 )
+
+
+@dataclass(frozen=True)
+class CalibrationPrompt:
+    id: str | None
+    name: str
+    count: int
+    prompt: str | None = None
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -168,6 +177,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Negative clips to record (default: 10).",
+    )
+    p_cal.add_argument(
+        "--variant-plan",
+        default=None,
+        help=(
+            "Positive prompt variants, e.g. standard or "
+            "clean=5,quiet=5,slow=5,fast=5. Overrides --samples-per-spell."
+        ),
     )
 
     p_diag = sub.add_parser(
@@ -545,11 +562,15 @@ def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) 
         data_dir / "calibration" / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     examples: list[CalibrationExample] = []
+    prompt_plan = _calibration_prompt_plan(args.variant_plan, args.samples_per_spell)
     print(f"Calibration session: {session_dir}")
     print(
         "This records held-out attempts. They are not added as training samples "
         "unless you choose to do that later."
     )
+    if args.variant_plan:
+        summary = ", ".join(f"{p.name} x{p.count}" for p in prompt_plan)
+        print(f"Positive prompt variants: {summary}")
 
     with PushToTalkRecorder(
         config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
@@ -557,22 +578,29 @@ def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) 
         for spell in spells:
             spell_dir = session_dir / "positives" / f"{spell.id}_{spell.name}"
             spell_dir.mkdir(parents=True, exist_ok=True)
-            for i in range(args.samples_per_spell):
-                print(
-                    f"\nSay {spell.name!r} "
-                    f"({i + 1}/{args.samples_per_spell}). Hold '{config.hotkey}'."
-                )
-                audio = recorder.record_one()
-                example = _save_calibration_clip(
-                    audio,
-                    config,
-                    spell_dir / f"attempt_{i + 1:03d}.wav",
-                    kind="positive",
-                    expected_spell_id=spell.id,
-                    expected_spell_name=spell.name,
-                )
-                if example is not None:
-                    examples.append(example)
+            for prompt in prompt_plan:
+                variant_dir = spell_dir / prompt.id if prompt.id else spell_dir
+                total = prompt.count
+                for i in range(total):
+                    style = f" Style: {prompt.prompt}" if prompt.prompt else ""
+                    print(
+                        f"\nSay {spell.name!r} ({prompt.name} {i + 1}/{total})."
+                        f"{style} Hold '{config.hotkey}'."
+                    )
+                    audio = recorder.record_one()
+                    example = _save_calibration_clip(
+                        audio,
+                        config,
+                        variant_dir / f"attempt_{i + 1:03d}.wav",
+                        kind="positive",
+                        expected_spell_id=spell.id,
+                        expected_spell_name=spell.name,
+                        variant_id=prompt.id,
+                        variant_name=prompt.name,
+                        prompt=prompt.prompt,
+                    )
+                    if example is not None:
+                        examples.append(example)
 
         negative_dir = session_dir / "negatives"
         negative_dir.mkdir(parents=True, exist_ok=True)
@@ -589,6 +617,9 @@ def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) 
                 kind="negative",
                 expected_spell_id=None,
                 expected_spell_name=None,
+                variant_id=None,
+                variant_name=None,
+                prompt=None,
             )
             if example is not None:
                 examples.append(example)
@@ -609,6 +640,9 @@ def _save_calibration_clip(
     kind: str,
     expected_spell_id: str | None,
     expected_spell_name: str | None,
+    variant_id: str | None = None,
+    variant_name: str | None = None,
+    prompt: str | None = None,
 ) -> CalibrationExample | None:
     if audio.size == 0:
         print("  (no audio captured; skipping)")
@@ -622,7 +656,84 @@ def _save_calibration_clip(
         kind=kind,
         expected_spell_id=expected_spell_id,
         expected_spell_name=expected_spell_name,
+        variant_id=variant_id,
+        variant_name=variant_name,
+        prompt=prompt,
     )
+
+
+def _calibration_prompt_plan(
+    variant_plan: str | None, samples_per_spell: int
+) -> list[CalibrationPrompt]:
+    if variant_plan is None:
+        return [CalibrationPrompt(id=None, name="attempt", count=samples_per_spell)]
+    plan = variant_plan.strip()
+    if not plan:
+        raise RuntimeError("--variant-plan cannot be empty")
+    if plan.lower() == "standard":
+        return [
+            CalibrationPrompt(
+                id="clean",
+                name="clean",
+                count=5,
+                prompt="Use your normal spell voice.",
+            ),
+            CalibrationPrompt(
+                id="quiet",
+                name="quiet",
+                count=5,
+                prompt="Say it clearly but quieter than normal.",
+            ),
+            CalibrationPrompt(
+                id="slow",
+                name="slow",
+                count=5,
+                prompt="Say it clearly and slower than normal.",
+            ),
+            CalibrationPrompt(
+                id="fast",
+                name="fast",
+                count=5,
+                prompt="Say it clearly and faster than normal.",
+            ),
+        ]
+    prompts: list[CalibrationPrompt] = []
+    for item in plan.split(","):
+        name, count = _parse_variant_plan_item(item)
+        prompts.append(
+            CalibrationPrompt(
+                id=_slugify_variant(name),
+                name=name,
+                count=count,
+                prompt=f"Use the {name} variation.",
+            )
+        )
+    return prompts
+
+
+def _parse_variant_plan_item(item: str) -> tuple[str, int]:
+    if "=" not in item:
+        raise RuntimeError(
+            "Variant plan entries must look like name=count, e.g. clean=5,quiet=5."
+        )
+    raw_name, raw_count = item.split("=", 1)
+    name = raw_name.strip()
+    if not name:
+        raise RuntimeError("Variant plan names cannot be empty.")
+    try:
+        count = int(raw_count.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Variant count for {name!r} must be an integer.") from exc
+    if count <= 0:
+        raise RuntimeError(f"Variant count for {name!r} must be positive.")
+    return name, count
+
+
+def _slugify_variant(name: str) -> str:
+    slug = "".join(c.lower() if c.isalnum() else "_" for c in name).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "variant"
 
 
 def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
@@ -791,6 +902,7 @@ def _print_calibration_report(report: CalibrationReport) -> None:
         f"wrong casts {positive_wrong}, negative false accepts "
         f"{negative_false_accepts}/{len(negatives)}"
     )
+    _print_variant_breakdown(positives)
 
     problem_examples = [
         d
@@ -806,8 +918,13 @@ def _print_calibration_report(report: CalibrationReport) -> None:
             best = d.best_spell_name or "(none)"
             intra = f"{d.intra_ratio:.2f}" if d.intra_ratio is not None else "n/a"
             margin = f"{d.margin_ratio:.2f}" if d.margin_ratio is not None else "n/a"
+            variant = (
+                f" variant={d.example.variant_name},"
+                if d.example.variant_name is not None
+                else ""
+            )
             print(
-                f"  {d.example.path.name}: expected={expected}, best={best}, "
+                f"  {d.example.path.name}:{variant} expected={expected}, best={best}, "
                 f"accepted={d.accepted}, intra={intra}, margin={margin}"
             )
 
@@ -872,6 +989,25 @@ def _print_calibration_comparison(reports: list[CalibrationReport]) -> None:
                 f"{row.negative_accepted}/{row.negative_total} FA"
             )
         print(f"  margin>={margin:>4.2f}: " + " | ".join(parts))
+
+
+def _print_variant_breakdown(positives: list) -> None:
+    variant_names = sorted(
+        {d.example.variant_name for d in positives if d.example.variant_name}
+    )
+    if not variant_names:
+        return
+    print("Positive breakdown by variant:")
+    for variant_name in variant_names:
+        variant_examples = [
+            d for d in positives if d.example.variant_name == variant_name
+        ]
+        hits = sum(1 for d in variant_examples if d.accepted and d.correct)
+        wrong = sum(1 for d in variant_examples if d.accepted and not d.correct)
+        print(
+            f"  {variant_name}: {hits}/{len(variant_examples)} accepted"
+            f" correct, wrong casts {wrong}"
+        )
 
 
 def _rss_repr(report: CalibrationReport) -> str:

@@ -26,6 +26,9 @@ class CalibrationExample:
     kind: str
     expected_spell_id: str | None = None
     expected_spell_name: str | None = None
+    variant_id: str | None = None
+    variant_name: str | None = None
+    prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,9 @@ def write_calibration_metadata(
                 "kind": e.kind,
                 "expected_spell_id": e.expected_spell_id,
                 "expected_spell_name": e.expected_spell_name,
+                "variant_id": e.variant_id,
+                "variant_name": e.variant_name,
+                "prompt": e.prompt,
             }
             for e in examples
         ],
@@ -102,6 +108,9 @@ def load_calibration_examples(session_dir: Path) -> list[CalibrationExample]:
                 kind=entry["kind"],
                 expected_spell_id=entry.get("expected_spell_id"),
                 expected_spell_name=entry.get("expected_spell_name"),
+                variant_id=entry.get("variant_id"),
+                variant_name=entry.get("variant_name"),
+                prompt=entry.get("prompt"),
             )
         )
     return examples

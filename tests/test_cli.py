@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from osc_grimoire.calibration import CalibrationReport, ThresholdSweepResult
-from osc_grimoire.cli import _print_calibration_comparison, _resolve_diagnose_backends
+from osc_grimoire.cli import (
+    _calibration_prompt_plan,
+    _print_calibration_comparison,
+    _resolve_diagnose_backends,
+)
 
 
 def _report(name: str, hits: int, false_accepts: int) -> CalibrationReport:
@@ -62,3 +66,21 @@ def test_resolve_whisper_backend_name_without_loading_model() -> None:
 def test_resolve_openwakeword_backend_name_without_loading_model() -> None:
     backend = _resolve_diagnose_backends("oww-dtw", None)[0]
     assert backend.name == "oww-dtw:speech_embedding"
+
+
+def test_standard_calibration_prompt_plan() -> None:
+    plan = _calibration_prompt_plan("standard", samples_per_spell=3)
+    assert [(p.id, p.count) for p in plan] == [
+        ("clean", 5),
+        ("quiet", 5),
+        ("slow", 5),
+        ("fast", 5),
+    ]
+
+
+def test_custom_calibration_prompt_plan() -> None:
+    plan = _calibration_prompt_plan("clean=2, loud voice=3", samples_per_spell=5)
+    assert [(p.id, p.name, p.count) for p in plan] == [
+        ("clean", "clean", 2),
+        ("loud_voice", "loud voice", 3),
+    ]

@@ -9,6 +9,7 @@ import pytest
 from osc_grimoire.calibration import (
     CalibrationExample,
     diagnose_calibration_session,
+    load_calibration_examples,
     write_calibration_metadata,
 )
 from osc_grimoire.config import VoiceRecognitionConfig
@@ -115,6 +116,42 @@ def test_diagnose_with_backend_stats_does_not_mutate_spellbook(tmp_path: Path) -
     assert report.backend_name == "fake"
     assert report.examples
     assert next(s for s in book.spells if s.id == spell.id).intra_class_median is None
+
+
+def test_calibration_metadata_round_trips_variant_fields(tmp_path: Path) -> None:
+    session_dir = tmp_path / "calibration" / "session"
+    path = session_dir / "positives" / "alpha" / "quiet" / "attempt_001.wav"
+    path.parent.mkdir(parents=True)
+    path.touch()
+
+    write_calibration_metadata(
+        session_dir,
+        [
+            CalibrationExample(
+                path=path,
+                kind="positive",
+                expected_spell_id="spell-1",
+                expected_spell_name="Alpha",
+                variant_id="quiet",
+                variant_name="quiet",
+                prompt="Say it clearly but quieter than normal.",
+            )
+        ],
+    )
+
+    loaded = load_calibration_examples(session_dir)
+
+    assert loaded == [
+        CalibrationExample(
+            path=path,
+            kind="positive",
+            expected_spell_id="spell-1",
+            expected_spell_name="Alpha",
+            variant_id="quiet",
+            variant_name="quiet",
+            prompt="Say it clearly but quieter than normal.",
+        )
+    ]
 
 
 def test_embedding_backend_missing_dependencies_message(
