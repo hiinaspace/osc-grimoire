@@ -11,6 +11,7 @@ import numpy as np
 from .audio_capture import NonBlockingAudioRecorder
 from .desktop_controller import (
     DEFAULT_SAMPLE_TARGET,
+    EmbeddingPoint,
     VoiceTrainingController,
 )
 from .paths import default_data_dir
@@ -35,10 +36,12 @@ class DesktopVoiceUi:
         self.recorder: NonBlockingAudioRecorder | None = None
         self.recorder_error: str | None = None
         self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
+        self._implot_context_created = False
 
     def draw(self) -> None:
         from imgui_bundle import imgui
 
+        self._ensure_implot_context()
         imgui.set_next_window_size(imgui.ImVec2(980, 720))
         _expanded, _open = imgui.begin(
             "OSC Grimoire",
@@ -98,6 +101,8 @@ class DesktopVoiceUi:
                 self.edit_name = spell.name
                 self.page = self._page_for_spell_id(spell.id)
         imgui.separator()
+        self._draw_embedding_plot()
+        imgui.separator()
         self._hold_button("Hold to Recognize (Space)", "recognize", allow_space=True)
 
         result = self.controller.last_result
@@ -151,6 +156,8 @@ class DesktopVoiceUi:
         self._hold_button("Hold to Record Sample (Space)", "sample", allow_space=True)
         imgui.same_line()
         self._hold_button("Hold to Test", "test", allow_space=False)
+        imgui.separator()
+        self._draw_embedding_plot()
 
         if spell is not None:
             self._draw_samples(spell)
@@ -194,8 +201,8 @@ class DesktopVoiceUi:
         result = self.controller.last_result
         imgui.text_unformatted(result.debug_text if result is not None else "(none)")
         imgui.separator()
-        imgui.text("Latent-space visualization placeholder")
-        imgui.text("Future: PCA/UMAP scatter of samples, attempts, and negatives.")
+        imgui.text("Embedding PCA")
+        self._draw_embedding_plot()
 
     def _hold_button(self, label: str, mode: str, *, allow_space: bool) -> None:
         from imgui_bundle import imgui
@@ -332,6 +339,83 @@ class DesktopVoiceUi:
             previews.append(self.waveform_cache[cache_key])
         return previews
 
+    def _draw_embedding_plot(self) -> None:
+        from imgui_bundle import imgui, implot
+
+        points = self.controller.embedding_points()
+        if not points:
+            imgui.text("Embedding PCA: no samples yet.")
+            return
+
+        imgui.text("Embedding PCA: spell samples are circles; latest attempt is X.")
+        plot_flags = implot.Flags_.no_mouse_text
+        if implot.begin_plot("##embedding_pca", imgui.ImVec2(900, 260), plot_flags):
+            axis_flags = implot.AxisFlags_.no_decorations
+            implot.setup_axes("", "", axis_flags, axis_flags)
+            self._plot_sample_points(points)
+            self._plot_query_points(points)
+            implot.end_plot()
+
+    def _ensure_implot_context(self) -> None:
+        if self._implot_context_created:
+            return
+        from imgui_bundle import implot
+
+        if implot.get_current_context() is None:
+            implot.create_context()
+        self._implot_context_created = True
+
+    def _plot_sample_points(self, points: tuple[EmbeddingPoint, ...]) -> None:
+        from imgui_bundle import implot
+
+        sample_groups = sorted({p.group for p in points if p.kind == "sample"})
+        for index, group in enumerate(sample_groups):
+            group_points = [
+                p for p in points if p.kind == "sample" and p.group == group
+            ]
+            if not group_points:
+                continue
+            color = _palette_color(index, 1.0)
+            spec = implot.Spec()
+            spec.marker = implot.Marker_.circle
+            spec.marker_size = 6.0
+            spec.marker_fill_color = color
+            spec.marker_line_color = color
+            spec.line_weight = 0.0
+            xs = np.array([p.x for p in group_points], dtype=np.float64)
+            ys = np.array([p.y for p in group_points], dtype=np.float64)
+            implot.plot_scatter(group, xs, ys, spec)
+
+    def _plot_query_points(self, points: tuple[EmbeddingPoint, ...]) -> None:
+        from imgui_bundle import imgui, implot
+
+        query_points = [p for p in points if p.kind == "query" and p.age == 0]
+        for point in query_points:
+            color = (
+                imgui.ImVec4(0.25, 1.0, 0.45, 1.0)
+                if point.accepted
+                else imgui.ImVec4(1.0, 0.35, 0.25, 1.0)
+            )
+            xs_all = [p.x for p in points]
+            ys_all = [p.y for p in points]
+            span = max(max(xs_all) - min(xs_all), max(ys_all) - min(ys_all), 1.0)
+            delta = span * 0.025
+            spec = implot.Spec()
+            spec.line_color = color
+            spec.line_weight = 2.0
+            implot.plot_line(
+                "latest attempt",
+                np.array([point.x - delta, point.x + delta], dtype=np.float64),
+                np.array([point.y - delta, point.y + delta], dtype=np.float64),
+                spec,
+            )
+            implot.plot_line(
+                "##latest_attempt_cross",
+                np.array([point.x - delta, point.x + delta], dtype=np.float64),
+                np.array([point.y + delta, point.y - delta], dtype=np.float64),
+                spec,
+            )
+
     def shutdown(self) -> None:
         if self.recorder is not None:
             self.recorder.stop_stream()
@@ -377,6 +461,21 @@ def _run_imgui(app: DesktopVoiceUi) -> None:
     params.window_size = (1000, 760)
     params.gui_function = app.draw
     immapp.run(params)
+
+
+def _palette_color(index: int, alpha: float):
+    from imgui_bundle import imgui
+
+    colors = (
+        (0.32, 0.68, 1.00),
+        (1.00, 0.62, 0.22),
+        (0.67, 0.85, 0.28),
+        (0.86, 0.44, 0.96),
+        (0.21, 0.88, 0.76),
+        (1.00, 0.42, 0.55),
+    )
+    r, g, b = colors[index % len(colors)]
+    return imgui.ImVec4(r, g, b, alpha)
 
 
 if __name__ == "__main__":

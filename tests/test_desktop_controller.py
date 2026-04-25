@@ -85,6 +85,24 @@ def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
     assert "decision: ACCEPTED" in result.debug_text
 
 
+def test_controller_embedding_points_include_samples_and_recent_queries(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+    controller.start_draft()
+    controller.update_draft_name("Low")
+    controller.add_sample_to_draft(np.full(16000, 0.1, dtype=np.float32))
+    controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+
+    points = controller.embedding_points()
+
+    assert {p.kind for p in points} == {"sample", "query"}
+    assert any(p.group == "Low" and p.kind == "sample" for p in points)
+    latest = next(p for p in points if p.kind == "query")
+    assert latest.age == 0
+    assert latest.accepted is True
+
+
 def test_controller_preloads_backend(tmp_path: Path) -> None:
     backend = _CountingBackend()
     controller = VoiceTrainingController(

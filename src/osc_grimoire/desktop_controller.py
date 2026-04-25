@@ -50,6 +50,17 @@ class RecognitionResult:
     debug_text: str
 
 
+@dataclass(frozen=True)
+class EmbeddingPoint:
+    x: float
+    y: float
+    label: str
+    group: str
+    kind: str
+    age: int = 0
+    accepted: bool | None = None
+
+
 class VoiceTrainingController:
     def __init__(
         self,
@@ -68,6 +79,7 @@ class VoiceTrainingController:
         self.draft: DraftSpell | None = None
         self.status = "Ready."
         self.last_result: RecognitionResult | None = None
+        self.recent_query_vectors: list[tuple[FloatArray, Decision, str]] = []
         self._backend_stats: BackendStats | None = None
         self._feature_cache: dict[Path, FloatArray] | None = None
 
@@ -182,8 +194,48 @@ class VoiceTrainingController:
             debug_text=format_recognition_debug(ranking, decision),
         )
         self.last_result = result
+        best_name = ranking[0].name if ranking else "(none)"
+        self.recent_query_vectors.append((_mean_vector(query), decision, best_name))
+        self.recent_query_vectors = self.recent_query_vectors[-8:]
         self.status = "Accepted." if decision.accepted else "Rejected."
         return result
+
+    def embedding_points(self) -> tuple[EmbeddingPoint, ...]:
+        _backend_stats, feature_cache = self._recognition_cache()
+        vectors: list[FloatArray] = []
+        metadata: list[tuple[str, str, bool | None, int]] = []
+        for spell in self.spellbook.spells:
+            for path in voice_sample_abs_paths(self.spellbook, spell):
+                features = feature_cache.get(path)
+                if features is None:
+                    continue
+                vectors.append(_mean_vector(features))
+                metadata.append((spell.name, "sample", None, 0))
+
+        history_count = len(self.recent_query_vectors)
+        for index, (vector, decision, best_name) in enumerate(
+            self.recent_query_vectors
+        ):
+            vectors.append(vector)
+            age = history_count - index - 1
+            metadata.append((best_name, "query", decision.accepted, age))
+
+        if not vectors:
+            return ()
+
+        projected = _pca_2d(np.vstack(vectors).astype(np.float32))
+        return tuple(
+            EmbeddingPoint(
+                x=float(projected[i, 0]),
+                y=float(projected[i, 1]),
+                label=label,
+                group=label,
+                kind=kind,
+                accepted=accepted,
+                age=age,
+            )
+            for i, (label, kind, accepted, age) in enumerate(metadata)
+        )
 
     def sample_previews(self, spell: Spell, points: int = 160) -> list[FloatArray]:
         previews: list[FloatArray] = []
@@ -216,6 +268,7 @@ class VoiceTrainingController:
     def _invalidate_recognition_cache(self) -> None:
         self._backend_stats = None
         self._feature_cache = None
+        self.recent_query_vectors.clear()
 
     def _spell_or_raise(self, spell_id: str) -> Spell:
         spell = find_spell_by_id(self.spellbook, spell_id)
@@ -267,3 +320,24 @@ def format_recognition_debug(
         f"margin_ratio={margin_ratio} ({decision.reason})"
     )
     return "\n".join(lines)
+
+
+def _mean_vector(features: FloatArray) -> FloatArray:
+    array = np.asarray(features, dtype=np.float32)
+    if array.ndim == 1:
+        return array.reshape(1, -1).mean(axis=0).astype(np.float32)
+    return array.reshape(array.shape[0], -1).mean(axis=0).astype(np.float32)
+
+
+def _pca_2d(vectors: FloatArray) -> FloatArray:
+    if vectors.shape[0] == 1:
+        return np.zeros((1, 2), dtype=np.float32)
+    centered = vectors - vectors.mean(axis=0, keepdims=True)
+    _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
+    components = vt[:2].T
+    projected = centered @ components
+    if projected.shape[1] == 1:
+        projected = np.column_stack(
+            [projected[:, 0], np.zeros(projected.shape[0], dtype=np.float32)]
+        )
+    return projected[:, :2].astype(np.float32)
