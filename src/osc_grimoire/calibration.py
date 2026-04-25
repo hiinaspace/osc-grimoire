@@ -46,6 +46,14 @@ class ExampleDiagnosis:
 
 
 @dataclass(frozen=True)
+class VariantSweepResult:
+    variant_name: str
+    positive_total: int
+    positive_correct: int
+    positive_wrong: int
+
+
+@dataclass(frozen=True)
 class ThresholdSweepResult:
     margin_min: float
     positive_total: int
@@ -54,6 +62,7 @@ class ThresholdSweepResult:
     positive_wrong: int
     negative_total: int
     negative_accepted: int
+    variants: tuple[VariantSweepResult, ...] = ()
 
     @property
     def false_rejects(self) -> int:
@@ -237,16 +246,26 @@ def _sweep_threshold(
     positive_wrong = 0
     negative_total = 0
     negative_accepted = 0
+    variant_counts: dict[str, list[int]] = {}
     for diagnosis in diagnoses:
         accepted = _accepted_under(diagnosis, tuned)
         if diagnosis.example.kind == "positive":
             positive_total += 1
+            if diagnosis.example.variant_name is not None:
+                variant = variant_counts.setdefault(
+                    diagnosis.example.variant_name, [0, 0, 0]
+                )
+                variant[0] += 1
             if accepted:
                 positive_accepted += 1
                 if diagnosis.correct:
                     positive_correct += 1
+                    if diagnosis.example.variant_name is not None:
+                        variant_counts[diagnosis.example.variant_name][1] += 1
                 else:
                     positive_wrong += 1
+                    if diagnosis.example.variant_name is not None:
+                        variant_counts[diagnosis.example.variant_name][2] += 1
         else:
             negative_total += 1
             if accepted:
@@ -259,6 +278,15 @@ def _sweep_threshold(
         positive_wrong=positive_wrong,
         negative_total=negative_total,
         negative_accepted=negative_accepted,
+        variants=tuple(
+            VariantSweepResult(
+                variant_name=name,
+                positive_total=counts[0],
+                positive_correct=counts[1],
+                positive_wrong=counts[2],
+            )
+            for name, counts in sorted(variant_counts.items())
+        ),
     )
 
 

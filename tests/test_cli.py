@@ -5,9 +5,11 @@ from pathlib import Path
 from osc_grimoire.calibration import CalibrationReport, ThresholdSweepResult
 from osc_grimoire.cli import (
     _calibration_prompt_plan,
+    _diagnose_config_for_backend,
     _print_calibration_comparison,
     _resolve_diagnose_backends,
 )
+from osc_grimoire.config import VoiceRecognitionConfig
 
 
 def _report(name: str, hits: int, false_accepts: int) -> CalibrationReport:
@@ -84,3 +86,9 @@ def test_custom_calibration_prompt_plan() -> None:
         ("clean", "clean", 2),
         ("loud_voice", "loud voice", 3),
     ]
+
+
+def test_whisper_diagnosis_uses_backend_specific_margin() -> None:
+    backend = _resolve_diagnose_backends("whisper-dtw", None)[0]
+    config = _diagnose_config_for_backend(VoiceRecognitionConfig(), backend)
+    assert config.relative_margin_min == 0.15

@@ -17,11 +17,12 @@ from .audio_capture import PushToTalkRecorder
 from .calibration import (
     CalibrationExample,
     CalibrationReport,
+    ThresholdSweepResult,
     diagnose_calibration_session,
     latest_calibration_session,
     write_calibration_metadata,
 )
-from .config import AppConfig
+from .config import AppConfig, VoiceRecognitionConfig
 from .paths import default_data_dir
 from .spellbook import (
     Spell,
@@ -55,6 +56,7 @@ class CalibrationPrompt:
 
 
 LOGGER = logging.getLogger(__name__)
+WHISPER_DTW_RELATIVE_MARGIN_MIN = 0.15
 
 
 def cli_main(argv: Sequence[str] | None = None) -> int:
@@ -751,7 +753,12 @@ def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -
     try:
         backends = _resolve_diagnose_backends(args.backend, args.embedding_model)
         reports = [
-            diagnose_calibration_session(session_dir, spellbook, config.voice, backend)
+            diagnose_calibration_session(
+                session_dir,
+                spellbook,
+                _diagnose_config_for_backend(config.voice, backend),
+                backend,
+            )
             for backend in backends
         ]
     except RuntimeError as exc:
@@ -884,6 +891,14 @@ def _resolve_diagnose_backends(
     raise RuntimeError(f"Unknown backend {backend_name!r}")
 
 
+def _diagnose_config_for_backend(
+    config: VoiceRecognitionConfig, backend: VoiceTemplateBackend
+) -> VoiceRecognitionConfig:
+    if backend.name.startswith("whisper-dtw:"):
+        return replace(config, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN)
+    return config
+
+
 def _print_calibration_report(report: CalibrationReport) -> None:
     print()
     print(f"Diagnosis for {report.session_dir}")
@@ -936,6 +951,7 @@ def _print_calibration_report(report: CalibrationReport) -> None:
             f"positive hits {row.positive_correct:>2}/{row.positive_total:<2}  "
             f"wrong casts {row.positive_wrong:>2}  "
             f"false accepts {row.negative_accepted:>2}/{row.negative_total:<2}"
+            f"{_variant_sweep_repr(row)}"
         )
 
     print()
@@ -989,6 +1005,17 @@ def _print_calibration_comparison(reports: list[CalibrationReport]) -> None:
                 f"{row.negative_accepted}/{row.negative_total} FA"
             )
         print(f"  margin>={margin:>4.2f}: " + " | ".join(parts))
+
+
+def _variant_sweep_repr(row: ThresholdSweepResult) -> str:
+    if not row.variants:
+        return ""
+    parts = [
+        f"{v.variant_name} {v.positive_correct}/{v.positive_total}"
+        + (f" ({v.positive_wrong} wrong)" if v.positive_wrong else "")
+        for v in row.variants
+    ]
+    return "  variants: " + ", ".join(parts)
 
 
 def _print_variant_breakdown(positives: list) -> None:

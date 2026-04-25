@@ -154,6 +154,53 @@ def test_calibration_metadata_round_trips_variant_fields(tmp_path: Path) -> None
     ]
 
 
+def test_diagnose_sweep_counts_variants(tmp_path: Path) -> None:
+    book = load_spellbook(tmp_path / "data")
+    book, spell = create_spell(book, "Alpha")
+    sample_dir = book.data_dir / "samples" / f"spell_{spell.id}"
+    sample_dir.mkdir(parents=True)
+    for i in range(2):
+        path = sample_dir / f"voice_{i + 1:03d}.wav"
+        path.touch()
+        book = add_voice_sample(book, spell, path.relative_to(book.data_dir).as_posix())
+
+    session_dir = tmp_path / "calibration" / "session"
+    examples = []
+    for variant_name in ("clean", "fast"):
+        attempt = session_dir / "positives" / "alpha" / variant_name / "attempt_001.wav"
+        attempt.parent.mkdir(parents=True)
+        attempt.touch()
+        examples.append(
+            CalibrationExample(
+                path=attempt,
+                kind="positive",
+                expected_spell_id=spell.id,
+                expected_spell_name=spell.name,
+                variant_id=variant_name,
+                variant_name=variant_name,
+            )
+        )
+    write_calibration_metadata(session_dir, examples)
+
+    backend = VoiceTemplateBackend(
+        name="fake",
+        extract_path=lambda _path, _config: np.array([[1.0]], dtype=np.float32),
+        extract_array=lambda audio, _config, _sample_rate: audio,
+        distance=lambda _a, _b: 0.0,
+        aggregate=lambda distances: float(np.median(distances)),
+    )
+
+    report = diagnose_calibration_session(
+        session_dir, book, VoiceRecognitionConfig(relative_margin_min=0.0), backend
+    )
+
+    assert report.sweep[0].variants
+    assert [(v.variant_name, v.positive_correct) for v in report.sweep[0].variants] == [
+        ("clean", 1),
+        ("fast", 1),
+    ]
+
+
 def test_embedding_backend_missing_dependencies_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
