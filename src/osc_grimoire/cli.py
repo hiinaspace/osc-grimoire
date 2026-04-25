@@ -1,0 +1,731 @@
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from collections import Counter
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+
+from .audio_capture import PushToTalkRecorder
+from .calibration import (
+    CalibrationExample,
+    CalibrationReport,
+    diagnose_calibration_session,
+    latest_calibration_session,
+    write_calibration_metadata,
+)
+from .config import AppConfig
+from .paths import default_data_dir
+from .spellbook import (
+    Spell,
+    Spellbook,
+    add_voice_sample,
+    create_spell,
+    delete_spell,
+    find_spell_by_name,
+    load_spellbook,
+    next_voice_sample_path,
+    save_spellbook,
+)
+from .voice_recognizer import (
+    MFCC_DTW_BACKEND,
+    SpellRanking,
+    decide,
+    leave_one_out_eval,
+    rank_spells,
+    recompute_all,
+    recompute_spell_voice_stats,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+
+def cli_main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    config = AppConfig()
+    if args.hotkey:
+        config = _replace_hotkey(config, args.hotkey)
+    if args.device is not None:
+        config = _replace_device(config, args.device)
+
+    data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = _COMMANDS[args.command]
+    return handler(args, config, data_dir)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="osc-grimoire",
+        description="Voice-spell recognition CLI (Milestone 1).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="Override the platformdirs data directory.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+    parser.add_argument(
+        "--hotkey",
+        default=None,
+        help="Push-to-talk key for recording (default: space).",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Audio input device (index or name substring).",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("info", help="Show data dir, audio devices, and spellbook summary.")
+
+    p_train = sub.add_parser("train", help="Train a spell by recording samples.")
+    p_train.add_argument("name", help="Spell name (will be created if new).")
+    p_train.add_argument(
+        "--samples", type=int, default=5, help="Samples to record (default 5)."
+    )
+
+    p_add = sub.add_parser("add-sample", help="Record one more sample for a spell.")
+    p_add.add_argument("name")
+
+    sub.add_parser("list", help="List spells and sample counts.")
+
+    p_del = sub.add_parser("delete", help="Delete a spell and its sample files.")
+    p_del.add_argument("name")
+    p_del.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation prompt."
+    )
+
+    sub.add_parser(
+        "recognize",
+        help="Loop: hold hotkey, speak, release; print the ranked match.",
+    )
+
+    sub.add_parser(
+        "test",
+        help="Leave-one-out evaluation across the spellbook.",
+    )
+
+    sub.add_parser(
+        "recompute",
+        help="Recompute per-spell intra-class median for every spell.",
+    )
+
+    p_neg = sub.add_parser(
+        "record-negatives",
+        help="Record gibberish/non-spell clips to a directory for rejection tests.",
+    )
+    p_neg.add_argument(
+        "--out",
+        default="tests/fixtures/voice_negatives",
+        help="Output directory (default: tests/fixtures/voice_negatives).",
+    )
+    p_neg.add_argument(
+        "--prefix",
+        default="neg",
+        help="Filename prefix for saved clips (default: neg).",
+    )
+    p_neg.add_argument(
+        "--count",
+        type=int,
+        default=10,
+        help="How many clips to record (default: 10).",
+    )
+
+    p_cal = sub.add_parser(
+        "calibrate",
+        help="Record labeled attempts and negatives, then recommend thresholds.",
+    )
+    p_cal.add_argument(
+        "--samples-per-spell",
+        type=int,
+        default=3,
+        help="Positive attempts to record per spell (default: 3).",
+    )
+    p_cal.add_argument(
+        "--negatives",
+        type=int,
+        default=10,
+        help="Negative clips to record (default: 10).",
+    )
+
+    p_diag = sub.add_parser(
+        "diagnose",
+        help="Analyze the latest calibration session, or one passed via --session.",
+    )
+    p_diag.add_argument(
+        "--session",
+        default=None,
+        help="Calibration session directory (default: latest under data-dir).",
+    )
+
+    return parser
+
+
+def _replace_hotkey(config: AppConfig, hotkey: str) -> AppConfig:
+    return replace(config, hotkey=hotkey)
+
+
+def _replace_device(config: AppConfig, device: str) -> AppConfig:
+    parsed: int | str
+    try:
+        parsed = int(device)
+    except ValueError:
+        parsed = device
+    return replace(config, audio=replace(config.audio, input_device=parsed))
+
+
+def _cmd_info(_args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    print(f"data dir: {data_dir}")
+    print(f"hotkey  : {config.hotkey}")
+    print(f"audio   : {config.audio}")
+    print()
+    hostapis = sd.query_hostapis()
+    print("input devices:")
+    for idx, dev in enumerate(sd.query_devices()):
+        if dev["max_input_channels"] > 0:
+            marker = "*" if idx == sd.default.device[0] else " "
+            host = hostapis[dev["hostapi"]]["name"]
+            print(
+                f"  {marker} [{idx:>3}] {dev['name']} "
+                f"({dev['max_input_channels']} ch, {host})"
+            )
+    print()
+
+    spellbook = load_spellbook(data_dir)
+    print(f"spellbook: {len(spellbook.spells)} spell(s)")
+    for spell in spellbook.spells:
+        print(
+            f"  - {spell.name} [{spell.id[:8]}] "
+            f"voice={len(spell.voice_samples)} gesture={len(spell.gesture_samples)}"
+        )
+    return 0
+
+
+def _cmd_train(args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    spell = find_spell_by_name(spellbook, args.name)
+    if spell is None:
+        spellbook, spell = create_spell(spellbook, args.name)
+        print(f"Created new spell {spell.name!r} ({spell.id[:8]}).")
+    else:
+        print(
+            f"Adding to existing spell {spell.name!r} "
+            f"(currently {len(spell.voice_samples)} voice samples)."
+        )
+
+    print(
+        f"Recording {args.samples} sample(s). Hold '{config.hotkey}' to record, "
+        "release to stop."
+    )
+
+    spellbook = _record_samples(spellbook, spell, args.samples, config)
+    spellbook = _recompute_and_report(spellbook, spell.id, config)
+    save_spellbook(spellbook)
+
+    fresh = find_spell_by_name(spellbook, args.name)
+    assert fresh is not None
+    print(f"Done. {fresh.name!r} now has {len(fresh.voice_samples)} voice sample(s).")
+    return 0
+
+
+def _cmd_add_sample(args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    spell = find_spell_by_name(spellbook, args.name)
+    if spell is None:
+        print(f"No spell named {args.name!r}.", file=sys.stderr)
+        return 1
+
+    print(f"Hold '{config.hotkey}' to record one sample for {spell.name!r}.")
+    spellbook = _record_samples(spellbook, spell, 1, config)
+    spellbook = _recompute_and_report(spellbook, spell.id, config)
+    save_spellbook(spellbook)
+
+    fresh = find_spell_by_name(spellbook, args.name)
+    assert fresh is not None
+    print(f"{fresh.name!r} now has {len(fresh.voice_samples)} voice sample(s).")
+    return 0
+
+
+def _recompute_and_report(
+    spellbook: Spellbook, spell_id: str, config: AppConfig
+) -> Spellbook:
+    spell = next((s for s in spellbook.spells if s.id == spell_id), None)
+    if spell is None:
+        return spellbook
+    spellbook = recompute_spell_voice_stats(spellbook, spell, config.voice)
+    fresh = next((s for s in spellbook.spells if s.id == spell_id), None)
+    if fresh is not None:
+        if fresh.intra_class_median is not None:
+            print(
+                f"  intra-class median DTW for {fresh.name!r}: "
+                f"{fresh.intra_class_median:.1f} (over "
+                f"{len(fresh.voice_samples)} sample(s))"
+            )
+        else:
+            print(
+                f"  intra-class median for {fresh.name!r}: not computable "
+                f"(need at least 2 samples)"
+            )
+    return spellbook
+
+
+def _cmd_list(_args: argparse.Namespace, _config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    if not spellbook.spells:
+        print("(no spells)")
+        return 0
+    name_w = max(len(s.name) for s in spellbook.spells)
+    for spell in spellbook.spells:
+        intra = (
+            f"{spell.intra_class_median:7.1f}"
+            if spell.intra_class_median is not None
+            else "    n/a"
+        )
+        print(
+            f"{spell.name:<{name_w}}  [{spell.id[:8]}]  "
+            f"voice={len(spell.voice_samples):>2}  "
+            f"gesture={len(spell.gesture_samples):>2}  "
+            f"intra={intra}  "
+            f"{'enabled' if spell.enabled else 'disabled'}"
+        )
+    return 0
+
+
+def _cmd_delete(args: argparse.Namespace, _config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    spell = find_spell_by_name(spellbook, args.name)
+    if spell is None:
+        print(f"No spell named {args.name!r}.", file=sys.stderr)
+        return 1
+    if not args.yes:
+        ans = input(
+            f"Delete {spell.name!r} ({len(spell.voice_samples)} sample(s))? [y/N] "
+        )
+        if ans.strip().lower() != "y":
+            print("Aborted.")
+            return 0
+
+    for rel in spell.voice_samples:
+        path = data_dir / rel
+        if path.exists():
+            path.unlink()
+    samples_root = data_dir / "samples" / f"spell_{spell.id}"
+    if samples_root.exists():
+        for f in samples_root.iterdir():
+            f.unlink()
+        samples_root.rmdir()
+
+    spellbook = delete_spell(spellbook, spell.id)
+    save_spellbook(spellbook)
+    print(f"Deleted {spell.name!r}.")
+    return 0
+
+
+def _cmd_recognize(_args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    if not spellbook.spells:
+        print("Spellbook is empty. Train some spells first.", file=sys.stderr)
+        return 1
+
+    missing_intra = [
+        s.name
+        for s in spellbook.spells
+        if s.has_voice and s.voice_samples and s.intra_class_median is None
+    ]
+    if missing_intra:
+        print(
+            "  WARNING: spells without intra-class median: "
+            f"{', '.join(missing_intra)}. Run `osc-grimoire recompute` first.",
+            file=sys.stderr,
+        )
+
+    print(f"Hold '{config.hotkey}' and speak. Release to classify. Ctrl-C to quit.")
+    feature_cache: dict[Path, np.ndarray] = {}
+
+    with PushToTalkRecorder(
+        config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
+    ) as recorder:
+        try:
+            while True:
+                audio = recorder.record_one()
+                if audio.size == 0:
+                    print("(no audio captured)")
+                    continue
+                duration = audio.size / config.audio.sample_rate
+                print(f"  captured {duration:.2f}s of audio")
+                query = MFCC_DTW_BACKEND.extract_array(
+                    audio, config.voice, config.audio.sample_rate
+                )
+                ranking = rank_spells(
+                    query,
+                    spellbook,
+                    config.voice,
+                    feature_cache,
+                    backend=MFCC_DTW_BACKEND,
+                )
+                if not ranking:
+                    print("  no rankable spells")
+                    continue
+                _print_ranking(ranking)
+                decision = decide(ranking, config.voice)
+                verdict = "ACCEPTED" if decision.accepted else "rejected"
+                _print_decision(decision, verdict)
+                print()
+        except KeyboardInterrupt:
+            print()
+            return 0
+
+
+def _print_decision(decision, verdict: str) -> None:
+    intra = (
+        f"{decision.intra_ratio:.2f}/{decision.intra_ratio_max:.2f}"
+        if decision.intra_ratio is not None
+        else "n/a"
+    )
+    margin = (
+        f"{decision.margin_ratio:.2f}/{decision.margin_ratio_min:.2f}"
+        if decision.margin_ratio is not None
+        else "n/a"
+    )
+    print(
+        f"  decision: {verdict}  "
+        f"intra_ratio={intra}  margin_ratio={margin}  ({decision.reason})"
+    )
+
+
+def _cmd_test(_args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    if not spellbook.spells:
+        print("Spellbook is empty. Train some spells first.", file=sys.stderr)
+        return 1
+
+    results = leave_one_out_eval(spellbook, config.voice)
+    if not results:
+        print("No samples available for evaluation.")
+        return 0
+
+    correct = sum(1 for r in results if r.correct)
+    total = len(results)
+    print(f"Leave-one-out: {correct}/{total} correct ({100 * correct / total:.1f}%)")
+    print()
+    name_w = max(len(r.spell_name) for r in results)
+    for r in results:
+        marker = "OK" if r.correct else "MISS"
+        sample = r.sample_path.name
+        intra_repr = f"{r.intra_ratio:5.2f}" if r.intra_ratio is not None else "  n/a"
+        margin_repr = (
+            f"{r.margin_ratio:5.2f}" if r.margin_ratio is not None else "  n/a"
+        )
+        print(
+            f"  [{marker:4}] {r.spell_name:<{name_w}}  {sample}  "
+            f"best={r.best_spell_name:<{name_w}} "
+            f"d={r.best_distance:7.2f}  "
+            f"intra_ratio={intra_repr}  margin_ratio={margin_repr}"
+        )
+
+    print()
+    confusions: Counter[tuple[str, str]] = Counter()
+    for r in results:
+        if not r.correct:
+            confusions[(r.spell_name, r.best_spell_name)] += 1
+    if confusions:
+        print("Top confusions (true -> predicted, count):")
+        for (true, pred), count in confusions.most_common():
+            print(f"  {true} -> {pred}: {count}")
+    return 0
+
+
+def _cmd_recompute(_args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    if not spellbook.spells:
+        print("(no spells)")
+        return 0
+    spellbook = recompute_all(spellbook, config.voice)
+    save_spellbook(spellbook)
+    for spell in spellbook.spells:
+        intra = (
+            f"{spell.intra_class_median:7.1f}"
+            if spell.intra_class_median is not None
+            else "    n/a"
+        )
+        print(f"  {spell.name}: intra_class_median={intra}")
+    return 0
+
+
+def _cmd_record_negatives(
+    args: argparse.Namespace, config: AppConfig, _data_dir: Path
+) -> int:
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Hold '{config.hotkey}' and say things that should NOT match any spell. "
+        f"Recording {args.count} clip(s) to {out_dir}."
+    )
+    n_existing = len(list(out_dir.glob(f"{args.prefix}_*.wav")))
+    with PushToTalkRecorder(
+        config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
+    ) as recorder:
+        for i in range(args.count):
+            print(f"\nNegative {i + 1}/{args.count}: ready when you are…")
+            audio = recorder.record_one()
+            if audio.size == 0:
+                print("  (no audio captured; skipping)")
+                continue
+            duration = audio.size / config.audio.sample_rate
+            n = n_existing + i + 1
+            path = out_dir / f"{args.prefix}_{n:03d}.wav"
+            sf.write(str(path), audio, config.audio.sample_rate)
+            print(f"  saved {path} ({duration:.2f}s)")
+    return 0
+
+
+def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    spells = [s for s in spellbook.spells if s.enabled and s.has_voice]
+    if not spells:
+        print("No enabled voice spells. Train some spells first.", file=sys.stderr)
+        return 1
+
+    spellbook = recompute_all(spellbook, config.voice)
+    save_spellbook(spellbook)
+    spells = [s for s in spellbook.spells if s.enabled and s.has_voice]
+
+    session_dir = (
+        data_dir / "calibration" / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    examples: list[CalibrationExample] = []
+    print(f"Calibration session: {session_dir}")
+    print(
+        "This records held-out attempts. They are not added as training samples "
+        "unless you choose to do that later."
+    )
+
+    with PushToTalkRecorder(
+        config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
+    ) as recorder:
+        for spell in spells:
+            spell_dir = session_dir / "positives" / f"{spell.id}_{spell.name}"
+            spell_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(args.samples_per_spell):
+                print(
+                    f"\nSay {spell.name!r} "
+                    f"({i + 1}/{args.samples_per_spell}). Hold '{config.hotkey}'."
+                )
+                audio = recorder.record_one()
+                example = _save_calibration_clip(
+                    audio,
+                    config,
+                    spell_dir / f"attempt_{i + 1:03d}.wav",
+                    kind="positive",
+                    expected_spell_id=spell.id,
+                    expected_spell_name=spell.name,
+                )
+                if example is not None:
+                    examples.append(example)
+
+        negative_dir = session_dir / "negatives"
+        negative_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(args.negatives):
+            print(
+                f"\nSay something that should NOT cast "
+                f"({i + 1}/{args.negatives}). Hold '{config.hotkey}'."
+            )
+            audio = recorder.record_one()
+            example = _save_calibration_clip(
+                audio,
+                config,
+                negative_dir / f"negative_{i + 1:03d}.wav",
+                kind="negative",
+                expected_spell_id=None,
+                expected_spell_name=None,
+            )
+            if example is not None:
+                examples.append(example)
+
+    write_calibration_metadata(session_dir, examples)
+    report = diagnose_calibration_session(session_dir, spellbook, config.voice)
+    _print_calibration_report(report)
+    return 0
+
+
+def _save_calibration_clip(
+    audio: np.ndarray,
+    config: AppConfig,
+    path: Path,
+    *,
+    kind: str,
+    expected_spell_id: str | None,
+    expected_spell_name: str | None,
+) -> CalibrationExample | None:
+    if audio.size == 0:
+        print("  (no audio captured; skipping)")
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), audio, config.audio.sample_rate)
+    duration = audio.size / config.audio.sample_rate
+    print(f"  saved {path} ({duration:.2f}s)")
+    return CalibrationExample(
+        path=path,
+        kind=kind,
+        expected_spell_id=expected_spell_id,
+        expected_spell_name=expected_spell_name,
+    )
+
+
+def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -> int:
+    spellbook = load_spellbook(data_dir)
+    if not spellbook.spells:
+        print("Spellbook is empty. Train some spells first.", file=sys.stderr)
+        return 1
+    session_dir = (
+        Path(args.session) if args.session else latest_calibration_session(data_dir)
+    )
+    if session_dir is None:
+        print("No calibration session found. Run `osc-grimoire calibrate` first.")
+        return 1
+
+    spellbook = recompute_all(spellbook, config.voice)
+    save_spellbook(spellbook)
+    report = diagnose_calibration_session(session_dir, spellbook, config.voice)
+    _print_calibration_report(report)
+    return 0
+
+
+def _print_calibration_report(report: CalibrationReport) -> None:
+    print()
+    print(f"Diagnosis for {report.session_dir}")
+    positives = [d for d in report.examples if d.example.kind == "positive"]
+    negatives = [d for d in report.examples if d.example.kind == "negative"]
+    positive_hits = sum(1 for d in positives if d.accepted and d.correct)
+    positive_wrong = sum(1 for d in positives if d.accepted and not d.correct)
+    negative_false_accepts = sum(1 for d in negatives if d.accepted)
+    print(
+        f"Current thresholds: positives accepted {positive_hits}/{len(positives)}, "
+        f"wrong casts {positive_wrong}, negative false accepts "
+        f"{negative_false_accepts}/{len(negatives)}"
+    )
+
+    problem_examples = [
+        d
+        for d in report.examples
+        if (d.example.kind == "positive" and not (d.accepted and d.correct))
+        or (d.example.kind == "negative" and d.accepted)
+    ]
+    if problem_examples:
+        print()
+        print("Examples needing attention:")
+        for d in problem_examples[:12]:
+            expected = d.example.expected_spell_name or "(negative)"
+            best = d.best_spell_name or "(none)"
+            intra = f"{d.intra_ratio:.2f}" if d.intra_ratio is not None else "n/a"
+            margin = f"{d.margin_ratio:.2f}" if d.margin_ratio is not None else "n/a"
+            print(
+                f"  {d.example.path.name}: expected={expected}, best={best}, "
+                f"accepted={d.accepted}, intra={intra}, margin={margin}"
+            )
+
+    print()
+    print("Margin threshold sweep:")
+    for row in report.sweep:
+        print(
+            f"  margin>={row.margin_min:>4.2f}: "
+            f"positive hits {row.positive_correct:>2}/{row.positive_total:<2}  "
+            f"wrong casts {row.positive_wrong:>2}  "
+            f"false accepts {row.negative_accepted:>2}/{row.negative_total:<2}"
+        )
+
+    print()
+    if report.recommended_margin_min is None:
+        print(
+            "No margin threshold cleanly accepted positives while rejecting all "
+            "negatives. Add more distinct samples, delete outliers, or try a "
+            "different recognizer."
+        )
+    else:
+        print(
+            "Recommended relative_margin_min: "
+            f"{report.recommended_margin_min:.2f} "
+            "(best zero-false-accept point in this session)."
+        )
+
+
+def _record_samples(
+    spellbook: Spellbook, spell: Spell, count: int, config: AppConfig
+) -> Spellbook:
+    with PushToTalkRecorder(
+        config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
+    ) as recorder:
+        for i in range(count):
+            print(f"\nSample {i + 1}/{count}: ready when you are…")
+            audio = recorder.record_one()
+            if audio.size == 0:
+                print("  (no audio captured; skipping)")
+                continue
+            duration = audio.size / config.audio.sample_rate
+            current_spell = next(s for s in spellbook.spells if s.id == spell.id)
+            wav_abs, wav_rel = next_voice_sample_path(spellbook, current_spell)
+            sf.write(str(wav_abs), audio, config.audio.sample_rate)
+            spellbook = add_voice_sample(spellbook, current_spell, wav_rel)
+            print(f"  saved {wav_rel} ({duration:.2f}s)")
+    return spellbook
+
+
+def _print_recording_state(recording: bool) -> None:
+    if recording:
+        print("  [recording…]", end="\r", flush=True)
+    else:
+        print("  [released]   ", flush=True)
+
+
+def _print_ranking(ranking: list[SpellRanking]) -> None:
+    name_w = max(len(r.name) for r in ranking)
+    for i, r in enumerate(ranking[:5]):
+        marker = "*" if i == 0 else " "
+        intra = (
+            f"{r.intra_class_median:7.1f}"
+            if r.intra_class_median is not None
+            else "    n/a"
+        )
+        print(
+            f"  {marker} {r.name:<{name_w}}  "
+            f"d={r.aggregate_distance:7.2f}  intra_med={intra}  "
+            f"per_sample=[{', '.join(f'{d:.2f}' for d in r.per_sample_distances)}]"
+        )
+
+
+_CommandHandler = Callable[[argparse.Namespace, AppConfig, Path], int]
+
+_COMMANDS: dict[str, _CommandHandler] = {
+    "info": _cmd_info,
+    "train": _cmd_train,
+    "add-sample": _cmd_add_sample,
+    "list": _cmd_list,
+    "delete": _cmd_delete,
+    "recognize": _cmd_recognize,
+    "test": _cmd_test,
+    "recompute": _cmd_recompute,
+    "record-negatives": _cmd_record_negatives,
+    "calibrate": _cmd_calibrate,
+    "diagnose": _cmd_diagnose,
+}

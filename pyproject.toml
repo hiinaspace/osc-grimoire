@@ -1,13 +1,22 @@
 [project]
 name = "osc-grimoire"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local OpenVR overlay for VRChat spell-casting via voice and gesture recognition"
 readme = "README.md"
 authors = [
     { name = "Hiina", email = "hiina@hiina.space" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "sounddevice>=0.5.0",
+    "soundfile>=0.13.0",
+    "numpy>=2.0",
+    "scipy>=1.15.0",
+    "librosa>=0.11.0",
+    "dtaidistance>=2.3.13",
+    "keyboard>=0.13.5",
+    "platformdirs>=4.5.0",
+]
 
 [project.scripts]
 osc-grimoire = "osc_grimoire:main"
@@ -15,3 +24,26 @@ osc-grimoire = "osc_grimoire:main"
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.15.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider --basetemp=.pytest-tmp"
+testpaths = ["tests"]

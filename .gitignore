@@ -8,3 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Test artifacts
+.pytest-tmp/
+.ruff_cache/
+
+# Local scratch data
+data/
+
+# Local agent/editor settings
+.claude/settings.local.json
