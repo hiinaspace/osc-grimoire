@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import threading
@@ -7,10 +8,13 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import ThreadingOSCUDPServer
+from zeroconf import ServiceInfo, Zeroconf
 
 from .config import OscConfig
 
@@ -49,7 +53,9 @@ class OscInputService:
         self._lock = threading.Lock()
         self._osc_server: ThreadingOSCUDPServer | None = None
         self._osc_thread: threading.Thread | None = None
-        self._oscquery_service: Any | None = None
+        self._oscquery_http_server: _OscQueryHttpServer | None = None
+        self._oscquery_http_thread: threading.Thread | None = None
+        self._zeroconf: Zeroconf | None = None
         self._ports: OscInputPorts | None = None
         self.status_text = "OSC input: stopped"
 
@@ -87,9 +93,17 @@ class OscInputService:
         LOGGER.info("%s", self.status_text)
 
     def stop(self) -> None:
-        if self._oscquery_service is not None:
-            self._oscquery_service.stop()
-            self._oscquery_service = None
+        if self._zeroconf is not None:
+            self._zeroconf.unregister_all_services()
+            self._zeroconf.close()
+            self._zeroconf = None
+        if self._oscquery_http_server is not None:
+            self._oscquery_http_server.shutdown()
+            self._oscquery_http_server.server_close()
+            self._oscquery_http_server = None
+        if self._oscquery_http_thread is not None:
+            self._oscquery_http_thread.join(timeout=1.0)
+            self._oscquery_http_thread = None
         if self._osc_server is not None:
             self._osc_server.shutdown()
             self._osc_server.server_close()
@@ -114,41 +128,191 @@ class OscInputService:
         LOGGER.info("OSC input %s", message.format())
 
     def _start_oscquery(self, osc_port: int, oscquery_port: int) -> None:
-        try:
-            from pythonoscquery.osc_query_service import (
-                OSCAccess,
-                OSCAddressSpace,
-                OSCPathNode,
-                OSCQueryService,
-            )
-        except ImportError:
-            LOGGER.warning(
-                "python-oscquery is unavailable; OSC input is not advertised."
-            )
+        host_info = oscquery_host_info(self.config, osc_port)
+        tree = oscquery_tree()
+        server = _OscQueryHttpServer(
+            (self.config.input_host, oscquery_port),
+            _OscQueryHttpHandler,
+            host_info=host_info,
+            tree=tree,
+        )
+        self._oscquery_http_server = server
+        self._oscquery_http_thread = threading.Thread(
+            target=server.serve_forever,
+            name="osc-grimoire-oscquery-input",
+            daemon=True,
+        )
+        self._oscquery_http_thread.start()
+        self._zeroconf = Zeroconf()
+        self._zeroconf.register_service(
+            _service_info(
+                "_oscjson._tcp.local.",
+                f"{self.config.service_name}._oscjson._tcp.local.",
+                self.config.service_name,
+                oscquery_port,
+                self.config.input_host,
+            ),
+            allow_name_change=True,
+        )
+        self._zeroconf.register_service(
+            _service_info(
+                "_osc._udp.local.",
+                f"{self.config.service_name}._osc._udp.local.",
+                self.config.service_name,
+                osc_port,
+                self.config.input_host,
+            ),
+            allow_name_change=True,
+        )
+
+
+class _OscQueryHttpServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_class: type[BaseHTTPRequestHandler],
+        *,
+        host_info: dict[str, Any],
+        tree: dict[str, Any],
+    ) -> None:
+        super().__init__(server_address, handler_class)
+        self.host_info = host_info
+        self.tree = tree
+
+
+class _OscQueryHttpHandler(BaseHTTPRequestHandler):
+    server: _OscQueryHttpServer
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        queries = parse_qs(parsed.query, keep_blank_values=True)
+        if "HOST_INFO" in queries:
+            self._respond_json(self.server.host_info)
             return
 
-        address_space = OSCAddressSpace()
-        for path in advertised_input_paths():
-            address_space.add_node(
-                OSCPathNode(
-                    path,
-                    access=OSCAccess.NO_VALUE,
-                    description="OSC Grimoire receive endpoint",
-                )
-            )
-        service = OSCQueryService(
-            address_space,
-            self.config.service_name,
-            oscquery_port,
-            osc_port,
-            self.config.input_host,
-        )
-        service.start()
-        self._oscquery_service = service
+        node = find_oscquery_node(self.server.tree, parsed.path or "/")
+        if node is None:
+            self.send_error(404, "OSC Path not found")
+            return
+        if queries:
+            attribute = next(iter(queries)).upper()
+            if attribute not in node:
+                self.send_response(204)
+                self.end_headers()
+                return
+            self._respond_json({attribute: node[attribute]})
+            return
+        self._respond_json(node)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        LOGGER.debug("OSCQuery HTTP " + format, *args)
+
+    def _respond_json(self, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def advertised_input_paths() -> tuple[str, ...]:
-    return ("/avatar", "/tracking/vrsystem")
+    return (
+        "/avatar/parameters",
+        "/tracking/vrsystem/head/pose",
+        "/tracking/vrsystem/leftwrist/pose",
+        "/tracking/vrsystem/rightwrist/pose",
+    )
+
+
+def oscquery_host_info(config: OscConfig, osc_port: int) -> dict[str, Any]:
+    return {
+        "NAME": config.service_name,
+        "OSC_IP": config.input_host,
+        "OSC_PORT": osc_port,
+        "OSC_TRANSPORT": "UDP",
+        "EXTENSIONS": {
+            "ACCESS": True,
+            "CLIPMODE": False,
+            "RANGE": False,
+            "TYPE": True,
+            "VALUE": True,
+        },
+    }
+
+
+def oscquery_tree() -> dict[str, Any]:
+    return {
+        "FULL_PATH": "/",
+        "ACCESS": 0,
+        "DESCRIPTION": "root node",
+        "CONTENTS": {
+            "avatar": {
+                "FULL_PATH": "/avatar",
+                "ACCESS": 0,
+                "CONTENTS": {
+                    "parameters": {
+                        "FULL_PATH": "/avatar/parameters",
+                        "ACCESS": 2,
+                        "TYPE": "b",
+                        "DESCRIPTION": "Receive VRChat avatar parameters",
+                    }
+                },
+            },
+            "tracking": {
+                "FULL_PATH": "/tracking",
+                "ACCESS": 0,
+                "CONTENTS": {
+                    "vrsystem": {
+                        "FULL_PATH": "/tracking/vrsystem",
+                        "ACCESS": 0,
+                        "CONTENTS": {
+                            "head": _pose_container(
+                                "/tracking/vrsystem/head",
+                                "/tracking/vrsystem/head/pose",
+                            ),
+                            "leftwrist": _pose_container(
+                                "/tracking/vrsystem/leftwrist",
+                                "/tracking/vrsystem/leftwrist/pose",
+                            ),
+                            "rightwrist": _pose_container(
+                                "/tracking/vrsystem/rightwrist",
+                                "/tracking/vrsystem/rightwrist/pose",
+                            ),
+                        },
+                    }
+                },
+            },
+        },
+    }
+
+
+def _pose_container(container_path: str, pose_path: str) -> dict[str, Any]:
+    return {
+        "FULL_PATH": container_path,
+        "ACCESS": 0,
+        "CONTENTS": {
+            "pose": {
+                "FULL_PATH": pose_path,
+                "ACCESS": 2,
+                "TYPE": "ffffff",
+                "DESCRIPTION": "Receive VRChat tracking pose",
+            }
+        },
+    }
+
+
+def find_oscquery_node(tree: dict[str, Any], path: str) -> dict[str, Any] | None:
+    if path == tree.get("FULL_PATH"):
+        return tree
+    contents = tree.get("CONTENTS")
+    if not isinstance(contents, dict):
+        return None
+    for child in contents.values():
+        found = find_oscquery_node(child, path)
+        if found is not None:
+            return found
+    return None
 
 
 def _resolve_input_ports(config: OscConfig) -> OscInputPorts:
@@ -167,6 +331,19 @@ def _free_tcp_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])
+
+
+def _service_info(
+    service_type: str, service_name: str, server_name: str, port: int, host: str
+) -> ServiceInfo:
+    return ServiceInfo(
+        service_type,
+        service_name,
+        port=port,
+        properties={"txtvers": "1"},
+        server=f"{server_name}.local.",
+        parsed_addresses=[host],
+    )
 
 
 def format_recent_osc_messages(messages: Sequence[ReceivedOscMessage]) -> str:
