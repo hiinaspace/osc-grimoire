@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 import soundfile as sf
@@ -49,6 +50,20 @@ DEFAULT_SAMPLE_TARGET = 10
 WHISPER_DTW_RELATIVE_MARGIN_MIN = 0.15
 
 
+class OutputSink(Protocol):
+    status_text: str
+
+    def set_voice_recording(self, recording: bool) -> None: ...
+
+    def set_gesture_drawing(self, drawing: bool) -> None: ...
+
+    def pulse_spell(self, spell: Spell) -> None: ...
+
+    def pulse_fizzle(self) -> None: ...
+
+    def tick(self, now: float | None = None) -> None: ...
+
+
 @dataclass(frozen=True)
 class DraftSpell:
     name: str
@@ -86,6 +101,7 @@ class VoiceTrainingController:
         config: AppConfig | None = None,
         backend: VoiceTemplateBackend | None = None,
         voice_config: VoiceRecognitionConfig | None = None,
+        output: OutputSink | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.config = config or AppConfig()
@@ -93,6 +109,7 @@ class VoiceTrainingController:
             self.config.voice, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN
         )
         self.backend = backend or whisper_dtw_backend()
+        self.output = output
         self.spellbook = load_spellbook(data_dir)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
@@ -103,6 +120,26 @@ class VoiceTrainingController:
         self.recent_query_vectors: list[tuple[FloatArray, Decision, str]] = []
         self._backend_stats: BackendStats | None = None
         self._feature_cache: dict[Path, FloatArray] | None = None
+
+    @property
+    def output_status(self) -> str | None:
+        return self.output.status_text if self.output is not None else None
+
+    def set_voice_recording(self, recording: bool) -> None:
+        if self.output is not None:
+            self.output.set_voice_recording(recording)
+
+    def set_gesture_drawing(self, drawing: bool) -> None:
+        if self.output is not None:
+            self.output.set_gesture_drawing(drawing)
+
+    def tick_outputs(self, now: float | None = None) -> None:
+        if self.output is not None:
+            self.output.tick(now)
+
+    def pulse_fizzle(self) -> None:
+        if self.output is not None:
+            self.output.pulse_fizzle()
 
     def preload_backend(self) -> None:
         # Force lazy model load before the UI appears so the first recording action
@@ -234,6 +271,7 @@ class VoiceTrainingController:
             )
             self.last_gesture_result = result
             self.status = "Gesture rejected."
+            self._emit_gesture_result(result)
             return result
         templates = load_gesture_templates(self.spellbook, self.config.gesture)
         raw_result = recognize_gesture(points, templates, self.config.gesture)
@@ -246,6 +284,7 @@ class VoiceTrainingController:
         self.status = (
             "Gesture accepted." if result.decision.accepted else "Gesture rejected."
         )
+        self._emit_gesture_result(result)
         return result
 
     def recognize(self, audio: FloatArray) -> RecognitionResult:
@@ -276,6 +315,7 @@ class VoiceTrainingController:
         self.recent_query_vectors.append((_mean_vector(query), decision, best_name))
         self.recent_query_vectors = self.recent_query_vectors[-8:]
         self.status = "Accepted." if decision.accepted else "Rejected."
+        self._emit_recognition_result(result)
         return result
 
     def embedding_points(self) -> tuple[EmbeddingPoint, ...]:
@@ -384,6 +424,22 @@ class VoiceTrainingController:
         self._backend_stats = None
         self._feature_cache = None
         self.recent_query_vectors.clear()
+
+    def _emit_recognition_result(self, result: RecognitionResult) -> None:
+        if self.output is None:
+            return
+        if result.decision.accepted and result.ranking:
+            self.output.pulse_spell(self._spell_or_raise(result.ranking[0].spell_id))
+        else:
+            self.output.pulse_fizzle()
+
+    def _emit_gesture_result(self, result: GestureResult) -> None:
+        if self.output is None:
+            return
+        if result.decision.accepted and result.decision.best_spell_id is not None:
+            self.output.pulse_spell(self._spell_or_raise(result.decision.best_spell_id))
+        else:
+            self.output.pulse_fizzle()
 
     def _spell_or_raise(self, spell_id: str) -> Spell:
         spell = find_spell_by_id(self.spellbook, spell_id)

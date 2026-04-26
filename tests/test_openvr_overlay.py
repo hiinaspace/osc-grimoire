@@ -268,9 +268,17 @@ class _FakeController:
 
     def __init__(self) -> None:
         self.gesture_count = 0
+        self.gesture_drawing: list[bool] = []
+        self.voice_recording: list[bool] = []
 
     def handle_gesture_stroke(self, _points) -> None:
         self.gesture_count += 1
+
+    def set_gesture_drawing(self, drawing: bool) -> None:
+        self.gesture_drawing.append(drawing)
+
+    def set_voice_recording(self, recording: bool) -> None:
+        self.voice_recording.append(recording)
 
 
 class _FakeApp:

@@ -14,6 +14,7 @@ from .desktop_controller import (
     EmbeddingPoint,
     VoiceTrainingController,
 )
+from .osc_output import OscOutput
 from .paths import default_data_dir
 from .spellbook import Spell
 from .voice_features import FloatArray
@@ -50,6 +51,7 @@ class DesktopVoiceUi:
     def draw(self) -> None:
         from imgui_bundle import imgui
 
+        self.controller.tick_outputs()
         self._ensure_implot_context()
         window_flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_collapse
         if self.overlay_mode:
@@ -79,6 +81,8 @@ class DesktopVoiceUi:
             self._draw_spell_page()
         imgui.separator()
         imgui.text(self.controller.status)
+        if self.controller.output_status is not None:
+            imgui.text(self.controller.output_status)
         if self.recorder_error:
             imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.25, 1.0), self.recorder_error)
         imgui.end()
@@ -359,6 +363,7 @@ class DesktopVoiceUi:
         recorder.begin_recording()
         self.recording_mode = mode
         self.recording_source = source
+        self.controller.set_voice_recording(True)
         self.controller.status = f"Recording {mode}..."
 
     def _finish_recording(self, mode: str, source: str) -> None:
@@ -367,12 +372,17 @@ class DesktopVoiceUi:
         audio = self.recorder.end_recording()
         self.recording_mode = None
         self.recording_source = None
+        self.controller.set_voice_recording(False)
         try:
             self._handle_recording(mode, audio)
         except ValueError as exc:
+            if mode == "recognize" or mode == "test":
+                self.controller.pulse_fizzle()
             self.controller.status = str(exc)
         except Exception as exc:
             LOGGER.exception("Recording action failed")
+            if mode == "recognize" or mode == "test":
+                self.controller.pulse_fizzle()
             self.controller.status = str(exc)
 
     def _handle_recording(self, mode: str, audio: FloatArray) -> None:
@@ -621,6 +631,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     controller = VoiceTrainingController(data_dir)
+    osc_output = OscOutput(controller.config.osc)
+    controller.output = osc_output
     controller.status = "Loading Whisper model..."
     controller.preload_backend()
     controller.status = "Ready."

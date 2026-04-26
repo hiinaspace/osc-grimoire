@@ -57,10 +57,22 @@ class OpenVrOverlayConfig:
 
 
 @dataclass(frozen=True)
+class OscConfig:
+    enabled: bool = True
+    service_name: str = "OSC Grimoire"
+    parameter_prefix: str = "OSCGrimoire"
+    fallback_host: str = "127.0.0.1"
+    fallback_port: int = 9000
+    pulse_seconds: float = 0.15
+    discovery_timeout_seconds: float = 0.5
+
+
+@dataclass(frozen=True)
 class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     voice: VoiceRecognitionConfig = field(default_factory=VoiceRecognitionConfig)
     gesture: GestureRecognitionConfig = field(default_factory=GestureRecognitionConfig)
     openvr: OpenVrOverlayConfig = field(default_factory=OpenVrOverlayConfig)
+    osc: OscConfig = field(default_factory=OscConfig)
     hotkey: str = "space"
     default_samples_per_spell: int = 5

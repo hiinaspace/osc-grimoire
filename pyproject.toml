@@ -23,6 +23,8 @@ dependencies = [
     "imgui-bundle[glfw]>=1.92.0",
     "openvr>=2.12.1401",
     "pyopengl>=3.1",
+    "python-oscquery>=0.4.0",
+    "python-osc>=1.10.2",
 ]
 
 [project.scripts]

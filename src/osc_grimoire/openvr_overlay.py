@@ -15,10 +15,11 @@ from typing import Any, cast
 
 import numpy as np
 
-from .config import OpenVrOverlayConfig
+from .config import AppConfig, OpenVrOverlayConfig
 from .desktop_controller import VoiceTrainingController
 from .desktop_ui import DesktopVoiceUi
 from .gesture_capture import GestureStrokeSampler
+from .osc_output import OscOutput
 from .paths import default_data_dir
 
 LOGGER = logging.getLogger(__name__)
@@ -213,7 +214,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
-    controller = VoiceTrainingController(data_dir)
+    config = AppConfig()
+    osc_output = OscOutput(config.osc)
+    controller = VoiceTrainingController(data_dir, config=config, output=osc_output)
     controller.status = "Loading Whisper model..."
     controller.preload_backend()
     controller.status = "Starting OpenVR overlay..."
@@ -286,6 +289,8 @@ class OpenVrOverlayRunner:
             self.shutdown()
 
     def shutdown(self) -> None:
+        self.app.controller.set_voice_recording(False)
+        self.app.controller.set_gesture_drawing(False)
         if self.vr_overlay is not None and self.overlay_handle is not None:
             try:
                 self.vr_overlay.destroyOverlay(self.overlay_handle)
@@ -444,6 +449,7 @@ class OpenVrOverlayRunner:
             )
             self._show_gesture_trail()
             self._update_gesture_trail()
+            self.app.controller.set_gesture_drawing(True)
             self.app.controller.status = "Recording gesture..."
         elif grip_down and self.gesture_sampler.active and pointer_pose.bPoseIsValid:
             self.gesture_sampler.add_controller_pose(
@@ -453,6 +459,7 @@ class OpenVrOverlayRunner:
         elif not grip_down and self.grip_down:
             points = self.gesture_sampler.finish()
             self._hide_gesture_trail()
+            self.app.controller.set_gesture_drawing(False)
             try:
                 self.app.controller.handle_gesture_stroke(points)
             except Exception as exc:

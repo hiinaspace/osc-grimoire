@@ -92,6 +92,31 @@ def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
     assert "decision: ACCEPTED" in result.debug_text
 
 
+def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    controller = _controller(tmp_path)
+    controller.output = output
+    controller.start_draft()
+    controller.update_draft_name("Low")
+    controller.add_sample_to_draft(np.full(16000, 0.1, dtype=np.float32))
+
+    controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+
+    assert output.spell_pulses == ["Low"]
+    assert output.fizzle_count == 0
+
+
+def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    controller = _controller(tmp_path)
+    controller.output = output
+
+    controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+
+    assert output.spell_pulses == []
+    assert output.fizzle_count == 1
+
+
 def test_controller_embedding_points_include_samples_and_recent_queries(
     tmp_path: Path,
 ) -> None:
@@ -191,6 +216,25 @@ def test_controller_recognizes_gesture(tmp_path: Path) -> None:
 
     assert result.decision.accepted
     assert result.ranking[0].name == spell.name
+
+
+def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(
+            min_points=3, score_min=0.5, margin_min=0.01
+        ),
+    )
+    controller.output = output
+    spell = controller.add_sample_to_draft(_audio(440))
+    controller.save_gesture_sample(spell.id, _gesture_line())
+
+    controller.recognize_gesture(_gesture_line())
+    controller.recognize_gesture(np.zeros((2, 2), dtype=np.float32))
+
+    assert output.spell_pulses == [spell.name]
+    assert output.fizzle_count == 1
 
 
 def test_controller_rejects_short_gesture_without_mutation(tmp_path: Path) -> None:
@@ -300,6 +344,32 @@ class _FakeRecorder:
     def end_recording(self) -> FloatArray:
         self.end_count += 1
         return np.zeros(1600, dtype=np.float32)
+
+
+class _FakeOutput:
+    status_text = "OSC target: fake"
+
+    def __init__(self) -> None:
+        self.voice_recording: list[bool] = []
+        self.gesture_drawing: list[bool] = []
+        self.spell_pulses: list[str] = []
+        self.fizzle_count = 0
+        self.tick_count = 0
+
+    def set_voice_recording(self, recording: bool) -> None:
+        self.voice_recording.append(recording)
+
+    def set_gesture_drawing(self, drawing: bool) -> None:
+        self.gesture_drawing.append(drawing)
+
+    def pulse_spell(self, spell) -> None:
+        self.spell_pulses.append(spell.name)
+
+    def pulse_fizzle(self) -> None:
+        self.fizzle_count += 1
+
+    def tick(self, now=None) -> None:
+        self.tick_count += 1
 
 
 def _fake_backend() -> VoiceTemplateBackend:
