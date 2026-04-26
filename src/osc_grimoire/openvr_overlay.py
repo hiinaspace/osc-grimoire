@@ -19,6 +19,7 @@ from .config import AppConfig, OpenVrOverlayConfig
 from .desktop_controller import VoiceTrainingController
 from .desktop_ui import DesktopVoiceUi
 from .gesture_capture import GestureStrokeSampler
+from .osc_input import OscInputService
 from .osc_output import OscOutput
 from .paths import default_data_dir
 
@@ -216,7 +217,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     data_dir.mkdir(parents=True, exist_ok=True)
     config = AppConfig()
     osc_output = OscOutput(config.osc)
-    controller = VoiceTrainingController(data_dir, config=config, output=osc_output)
+    osc_input = OscInputService(config.osc)
+    osc_input.start()
+    controller = VoiceTrainingController(
+        data_dir, config=config, output=osc_output, osc_input=osc_input
+    )
     controller.status = "Loading Whisper model..."
     controller.preload_backend()
     controller.status = "Starting OpenVR overlay..."

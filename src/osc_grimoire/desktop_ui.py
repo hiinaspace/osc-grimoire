@@ -14,6 +14,7 @@ from .desktop_controller import (
     EmbeddingPoint,
     VoiceTrainingController,
 )
+from .osc_input import OscInputService, format_recent_osc_messages
 from .osc_output import OscOutput
 from .paths import default_data_dir
 from .spellbook import Spell
@@ -83,6 +84,8 @@ class DesktopVoiceUi:
         imgui.text(self.controller.status)
         if self.controller.output_status is not None:
             imgui.text(self.controller.output_status)
+        if self.controller.input_status is not None:
+            imgui.text(self.controller.input_status)
         if self.recorder_error:
             imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.25, 1.0), self.recorder_error)
         imgui.end()
@@ -157,6 +160,11 @@ class DesktopVoiceUi:
         if gesture_result is not None:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
+        imgui.separator()
+        imgui.text("OSC input log")
+        imgui.text_unformatted(
+            format_recent_osc_messages(self.controller.recent_osc_messages())
+        )
         imgui.table_next_column()
         imgui.text("Embedding PCA")
         self._draw_embedding_plot()
@@ -332,6 +340,11 @@ class DesktopVoiceUi:
         if gesture_result is not None:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
+        imgui.separator()
+        imgui.text("OSC input log")
+        imgui.text_unformatted(
+            format_recent_osc_messages(self.controller.recent_osc_messages())
+        )
 
     def _hold_button(self, label: str, mode: str, *, allow_space: bool) -> None:
         from imgui_bundle import imgui
@@ -620,6 +633,8 @@ class DesktopVoiceUi:
         if self.recorder is not None:
             self.recorder.stop_stream()
             self.recorder = None
+        if self.controller.osc_input is not None:
+            self.controller.osc_input.stop()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -633,6 +648,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     controller = VoiceTrainingController(data_dir)
     osc_output = OscOutput(controller.config.osc)
     controller.output = osc_output
+    osc_input = OscInputService(controller.config.osc)
+    osc_input.start()
+    controller.osc_input = osc_input
     controller.status = "Loading Whisper model..."
     controller.preload_backend()
     controller.status = "Ready."

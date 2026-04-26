@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import soundfile as sf
@@ -64,6 +64,14 @@ class OutputSink(Protocol):
     def tick(self, now: float | None = None) -> None: ...
 
 
+class InputSink(Protocol):
+    status_text: str
+
+    def recent_messages(self) -> tuple[Any, ...]: ...
+
+    def stop(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class DraftSpell:
     name: str
@@ -102,6 +110,7 @@ class VoiceTrainingController:
         backend: VoiceTemplateBackend | None = None,
         voice_config: VoiceRecognitionConfig | None = None,
         output: OutputSink | None = None,
+        osc_input: InputSink | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.config = config or AppConfig()
@@ -110,6 +119,7 @@ class VoiceTrainingController:
         )
         self.backend = backend or whisper_dtw_backend()
         self.output = output
+        self.osc_input = osc_input
         self.spellbook = load_spellbook(data_dir)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
@@ -124,6 +134,15 @@ class VoiceTrainingController:
     @property
     def output_status(self) -> str | None:
         return self.output.status_text if self.output is not None else None
+
+    @property
+    def input_status(self) -> str | None:
+        return self.osc_input.status_text if self.osc_input is not None else None
+
+    def recent_osc_messages(self) -> tuple[Any, ...]:
+        if self.osc_input is None:
+            return ()
+        return self.osc_input.recent_messages()
 
     def set_voice_recording(self, recording: bool) -> None:
         if self.output is not None:

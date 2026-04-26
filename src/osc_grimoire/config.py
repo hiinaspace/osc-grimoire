@@ -65,6 +65,11 @@ class OscConfig:
     fallback_port: int = 9000
     pulse_seconds: float = 0.15
     discovery_timeout_seconds: float = 0.5
+    input_enabled: bool = True
+    input_host: str = "127.0.0.1"
+    input_osc_port: int = 0
+    input_oscquery_port: int = 0
+    input_log_limit: int = 80
 
 
 @dataclass(frozen=True)
