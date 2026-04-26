@@ -66,6 +66,9 @@ class OutputSink(Protocol):
 
 class InputSink(Protocol):
     status_text: str
+    ui_enabled: bool
+    gesture_enabled: bool
+    voice_enabled: bool
 
     def recent_messages(self) -> tuple[Any, ...]: ...
 
@@ -143,6 +146,18 @@ class VoiceTrainingController:
         if self.osc_input is None:
             return ()
         return self.osc_input.recent_messages()
+
+    @property
+    def ui_enabled(self) -> bool:
+        return self.osc_input.ui_enabled if self.osc_input is not None else True
+
+    @property
+    def gesture_enabled(self) -> bool:
+        return self.osc_input.gesture_enabled if self.osc_input is not None else True
+
+    @property
+    def voice_enabled(self) -> bool:
+        return self.osc_input.voice_enabled if self.osc_input is not None else True
 
     def set_voice_recording(self, recording: bool) -> None:
         if self.output is not None:

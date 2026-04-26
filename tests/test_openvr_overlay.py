@@ -161,6 +161,23 @@ def test_runner_routes_grip_stroke_to_controller() -> None:
     assert runner.vr_overlay.hidden == [456]
 
 
+def test_runner_ignores_grip_when_gesture_disabled() -> None:
+    app = _FakeApp()
+    app.controller.gesture_enabled = False
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    runner.vr_overlay = _FakeOverlay()
+    runner.trail_overlay_handle = 456
+
+    runner._update_gesture_capture(True, poses, poses[1])
+    runner._cancel_gesture_capture()
+
+    assert app.controller.gesture_count == 0
+    assert runner.vr_overlay.shown == []
+    assert runner.vr_overlay.hidden == []
+
+
 def test_trigger_off_overlay_records_voice_not_mouse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,6 +213,37 @@ def test_trigger_off_overlay_records_voice_not_mouse(
     assert app.voice_finish_count == 0
     assert runner.voice_trigger_down
     assert applied == [{"hovering": False, "trigger_down": False, "position": None}]
+
+
+def test_trigger_off_overlay_ignores_voice_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    app.controller.voice_enabled = False
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    monkeypatch.setattr(
+        runner,
+        "_input_state",
+        lambda: OpenVrInputState(
+            trigger_down=True,
+            trigger_changed=True,
+            grip_down=False,
+            pose=poses[1],
+        ),
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(runner, "_apply_mouse_events", lambda **_kwargs: None)
+
+    runner._inject_controller_input()
+
+    assert app.voice_begin_count == 0
+    assert not runner.voice_trigger_down
 
 
 def test_trigger_changed_without_pressed_state_does_not_finish_voice(
@@ -270,6 +318,9 @@ class _FakeController:
         self.gesture_count = 0
         self.gesture_drawing: list[bool] = []
         self.voice_recording: list[bool] = []
+        self.ui_enabled = True
+        self.gesture_enabled = True
+        self.voice_enabled = True
 
     def handle_gesture_stroke(self, _points) -> None:
         self.gesture_count += 1

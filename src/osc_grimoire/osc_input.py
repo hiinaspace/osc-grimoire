@@ -38,6 +38,13 @@ class OscInputPorts:
     oscquery_port: int
 
 
+@dataclass(frozen=True)
+class OscInputState:
+    ui_enabled: bool = True
+    gesture_enabled: bool = True
+    voice_enabled: bool = True
+
+
 class OscInputService:
     def __init__(
         self,
@@ -57,6 +64,7 @@ class OscInputService:
         self._oscquery_http_thread: threading.Thread | None = None
         self._zeroconf: Zeroconf | None = None
         self._ports: OscInputPorts | None = None
+        self._state = OscInputState()
         self.status_text = "OSC input: stopped"
 
     @property
@@ -90,6 +98,7 @@ class OscInputService:
             f"OSC input: {self.config.input_host}:{actual_osc_port}, "
             f"OSCQuery :{ports.oscquery_port}"
         )
+        self._refresh_status_text()
         LOGGER.info("%s", self.status_text)
 
     def stop(self) -> None:
@@ -117,15 +126,52 @@ class OscInputService:
         with self._lock:
             return tuple(self._messages)
 
+    @property
+    def state(self) -> OscInputState:
+        with self._lock:
+            return self._state
+
+    @property
+    def ui_enabled(self) -> bool:
+        return self.state.ui_enabled
+
+    @property
+    def gesture_enabled(self) -> bool:
+        return self.state.gesture_enabled
+
+    @property
+    def voice_enabled(self) -> bool:
+        return self.state.voice_enabled
+
     def _handle_message(self, address: str, *values: Any) -> None:
+        state_update = parse_enabled_parameter(address, values, self.config)
+        if state_update is None:
+            return
         message = ReceivedOscMessage(
             timestamp=self.time_fn(),
             address=address,
             values=tuple(values),
         )
         with self._lock:
+            self._state = update_input_state(self._state, state_update)
             self._messages.append(message)
-        LOGGER.info("OSC input %s", message.format())
+        self._refresh_status_text()
+        LOGGER.info("OSC control %s -> %s", message.format(), self.state)
+
+    def _refresh_status_text(self) -> None:
+        port_text = ""
+        if self._ports is not None:
+            port_text = (
+                f"{self.config.input_host}:{self._ports.osc_port}, "
+                f"OSCQuery :{self._ports.oscquery_port}; "
+            )
+        state = self.state
+        self.status_text = (
+            f"OSC input: {port_text}"
+            f"UI={'on' if state.ui_enabled else 'off'} "
+            f"gesture={'on' if state.gesture_enabled else 'off'} "
+            f"voice={'on' if state.voice_enabled else 'off'}"
+        )
 
     def _start_oscquery(self, osc_port: int, oscquery_port: int) -> None:
         host_info = oscquery_host_info(self.config, osc_port)
@@ -218,10 +264,9 @@ class _OscQueryHttpHandler(BaseHTTPRequestHandler):
 
 def advertised_input_paths() -> tuple[str, ...]:
     return (
-        "/avatar/parameters",
-        "/tracking/vrsystem/head/pose",
-        "/tracking/vrsystem/leftwrist/pose",
-        "/tracking/vrsystem/rightwrist/pose",
+        "/avatar/parameters/OSCGrimoireUIEnabled",
+        "/avatar/parameters/OSCGrimoireGestureEnabled",
+        "/avatar/parameters/OSCGrimoireVoiceEnabled",
     )
 
 
@@ -242,6 +287,10 @@ def oscquery_host_info(config: OscConfig, osc_port: int) -> dict[str, Any]:
 
 
 def oscquery_tree() -> dict[str, Any]:
+    parameter_contents = {
+        path.rsplit("/", 1)[-1]: _bool_parameter_node(path)
+        for path in advertised_input_paths()
+    }
     return {
         "FULL_PATH": "/",
         "ACCESS": 0,
@@ -253,33 +302,8 @@ def oscquery_tree() -> dict[str, Any]:
                 "CONTENTS": {
                     "parameters": {
                         "FULL_PATH": "/avatar/parameters",
-                        "ACCESS": 2,
-                        "TYPE": "b",
-                        "DESCRIPTION": "Receive VRChat avatar parameters",
-                    }
-                },
-            },
-            "tracking": {
-                "FULL_PATH": "/tracking",
-                "ACCESS": 0,
-                "CONTENTS": {
-                    "vrsystem": {
-                        "FULL_PATH": "/tracking/vrsystem",
                         "ACCESS": 0,
-                        "CONTENTS": {
-                            "head": _pose_container(
-                                "/tracking/vrsystem/head",
-                                "/tracking/vrsystem/head/pose",
-                            ),
-                            "leftwrist": _pose_container(
-                                "/tracking/vrsystem/leftwrist",
-                                "/tracking/vrsystem/leftwrist/pose",
-                            ),
-                            "rightwrist": _pose_container(
-                                "/tracking/vrsystem/rightwrist",
-                                "/tracking/vrsystem/rightwrist/pose",
-                            ),
-                        },
+                        "CONTENTS": parameter_contents,
                     }
                 },
             },
@@ -287,18 +311,12 @@ def oscquery_tree() -> dict[str, Any]:
     }
 
 
-def _pose_container(container_path: str, pose_path: str) -> dict[str, Any]:
+def _bool_parameter_node(path: str) -> dict[str, Any]:
     return {
-        "FULL_PATH": container_path,
-        "ACCESS": 0,
-        "CONTENTS": {
-            "pose": {
-                "FULL_PATH": pose_path,
-                "ACCESS": 2,
-                "TYPE": "ffffff",
-                "DESCRIPTION": "Receive VRChat tracking pose",
-            }
-        },
+        "FULL_PATH": path,
+        "ACCESS": 2,
+        "TYPE": "T",
+        "DESCRIPTION": "Receive OSC Grimoire enable toggle",
     }
 
 
@@ -344,6 +362,59 @@ def _service_info(
         server=f"{server_name}.local.",
         parsed_addresses=[host],
     )
+
+
+def parse_enabled_parameter(
+    address: str, values: tuple[Any, ...], config: OscConfig
+) -> tuple[str, bool] | None:
+    prefix = f"/avatar/parameters/{config.parameter_prefix}"
+    names = {
+        f"{prefix}UIEnabled": "ui_enabled",
+        f"{prefix}GestureEnabled": "gesture_enabled",
+        f"{prefix}VoiceEnabled": "voice_enabled",
+    }
+    field_name = names.get(address)
+    if field_name is None or not values:
+        return None
+    parsed = _parse_bool(values[0])
+    if parsed is None:
+        LOGGER.debug("Ignoring non-boolean OSC control %s %r", address, values)
+        return None
+    return field_name, parsed
+
+
+def update_input_state(state: OscInputState, update: tuple[str, bool]) -> OscInputState:
+    field_name, value = update
+    match field_name:
+        case "ui_enabled":
+            return OscInputState(
+                ui_enabled=value,
+                gesture_enabled=state.gesture_enabled,
+                voice_enabled=state.voice_enabled,
+            )
+        case "gesture_enabled":
+            return OscInputState(
+                ui_enabled=state.ui_enabled,
+                gesture_enabled=value,
+                voice_enabled=state.voice_enabled,
+            )
+        case "voice_enabled":
+            return OscInputState(
+                ui_enabled=state.ui_enabled,
+                gesture_enabled=state.gesture_enabled,
+                voice_enabled=value,
+            )
+    return state
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
+        return bool(value)
+    return None
 
 
 def format_recent_osc_messages(messages: Sequence[ReceivedOscMessage]) -> str:

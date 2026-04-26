@@ -266,6 +266,7 @@ class OpenVrOverlayRunner:
         self.grip_down = False
         self.trigger_down = False
         self.voice_trigger_down = False
+        self.overlay_visible = True
         self._shutdown_openvr = False
 
     def run(self) -> None:
@@ -283,10 +284,14 @@ class OpenVrOverlayRunner:
             self.app.controller.status = "Ready."
             while not self.renderer.should_close():
                 self.renderer.poll_events()
-                self._update_overlay_transform()
+                self.app.controller.tick_outputs()
+                self._sync_overlay_visibility()
+                if self.app.controller.ui_enabled:
+                    self._update_overlay_transform()
                 self._inject_controller_input()
-                self.renderer.render_frame(self.app.draw)
-                self._submit_overlay_texture()
+                if self.app.controller.ui_enabled:
+                    self.renderer.render_frame(self.app.draw)
+                    self._submit_overlay_texture()
                 time.sleep(1.0 / 90.0)
         except KeyboardInterrupt:
             return
@@ -353,6 +358,7 @@ class OpenVrOverlayRunner:
                 self.trail_overlay_handle, self.config.gesture_trail_width_m
             )
             self.vr_overlay.showOverlay(self.overlay_handle)
+            self.overlay_visible = True
         except Exception as exc:
             if self._shutdown_openvr:
                 openvr.shutdown()
@@ -382,6 +388,19 @@ class OpenVrOverlayRunner:
             self.overlay_handle, device_index, transform
         )
 
+    def _sync_overlay_visibility(self) -> None:
+        assert self.vr_overlay is not None
+        assert self.overlay_handle is not None
+        should_show = self.app.controller.ui_enabled
+        if should_show == self.overlay_visible:
+            return
+        if should_show:
+            self.vr_overlay.showOverlay(self.overlay_handle)
+        else:
+            self.vr_overlay.hideOverlay(self.overlay_handle)
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+        self.overlay_visible = should_show
+
     def _inject_controller_input(self) -> None:
         assert self.openvr is not None
         assert self.vr_system is not None
@@ -390,11 +409,15 @@ class OpenVrOverlayRunner:
         input_state = self._input_state()
         trigger_pressed = input_state.trigger_down and not self.trigger_down
         trigger_released = not input_state.trigger_down and self.trigger_down
+        if not self.app.controller.voice_enabled and self.voice_trigger_down:
+            self.app.finish_overlay_voice_recording()
+            self.voice_trigger_down = False
         if input_state.pose is None:
             if trigger_released and self.voice_trigger_down:
                 self.app.finish_overlay_voice_recording()
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self._cancel_gesture_capture()
             self.trigger_down = input_state.trigger_down
             return
 
@@ -405,6 +428,7 @@ class OpenVrOverlayRunner:
                 self.app.finish_overlay_voice_recording()
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self._cancel_gesture_capture()
             self.trigger_down = input_state.trigger_down
             return
         if not input_state.pose.bPoseIsValid:
@@ -412,12 +436,17 @@ class OpenVrOverlayRunner:
                 self.app.finish_overlay_voice_recording()
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
-            self._update_gesture_capture(False, poses, input_state.pose)
+            self._cancel_gesture_capture()
             self.trigger_down = input_state.trigger_down
             return
-        self._update_gesture_capture(input_state.grip_down, poses, input_state.pose)
+        if self.app.controller.gesture_enabled:
+            self._update_gesture_capture(input_state.grip_down, poses, input_state.pose)
+        else:
+            self._cancel_gesture_capture()
         ray = ray_from_pose(input_state.pose)
-        intersection = self._compute_intersection(ray)
+        intersection = (
+            self._compute_intersection(ray) if self.app.controller.ui_enabled else None
+        )
         if self.voice_trigger_down:
             self._update_overlay_voice_recording(trigger_pressed, trigger_released)
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
@@ -441,6 +470,10 @@ class OpenVrOverlayRunner:
     def _update_gesture_capture(
         self, grip_down: bool, poses: Any, pointer_pose: Any
     ) -> None:
+        if not self.app.controller.gesture_enabled:
+            self._cancel_gesture_capture()
+            self.grip_down = grip_down
+            return
         assert self.openvr is not None
         hmd_pose = poses[self.openvr.k_unTrackedDeviceIndex_Hmd]
         if grip_down and not self.grip_down:
@@ -475,12 +508,24 @@ class OpenVrOverlayRunner:
     def _update_overlay_voice_recording(
         self, trigger_pressed: bool, trigger_released: bool
     ) -> None:
+        if not self.app.controller.voice_enabled:
+            if self.voice_trigger_down:
+                self.app.finish_overlay_voice_recording()
+                self.voice_trigger_down = False
+            return
         if trigger_pressed:
             self.app.begin_overlay_voice_recording()
             self.voice_trigger_down = True
         elif trigger_released and self.voice_trigger_down:
             self.app.finish_overlay_voice_recording()
             self.voice_trigger_down = False
+
+    def _cancel_gesture_capture(self) -> None:
+        if self.gesture_sampler.active:
+            self.gesture_sampler.finish()
+            self._hide_gesture_trail()
+            self.app.controller.set_gesture_drawing(False)
+        self.grip_down = False
 
     def _configure_actions(self, manifest_path: Path) -> None:
         assert self.vr_input is not None

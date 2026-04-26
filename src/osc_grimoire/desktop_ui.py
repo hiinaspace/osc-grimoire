@@ -14,7 +14,7 @@ from .desktop_controller import (
     EmbeddingPoint,
     VoiceTrainingController,
 )
-from .osc_input import OscInputService, format_recent_osc_messages
+from .osc_input import OscInputService
 from .osc_output import OscOutput
 from .paths import default_data_dir
 from .spellbook import Spell
@@ -160,11 +160,6 @@ class DesktopVoiceUi:
         if gesture_result is not None:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
-        imgui.separator()
-        imgui.text("OSC input log")
-        imgui.text_unformatted(
-            format_recent_osc_messages(self.controller.recent_osc_messages())
-        )
         imgui.table_next_column()
         imgui.text("Embedding PCA")
         self._draw_embedding_plot()
@@ -340,11 +335,6 @@ class DesktopVoiceUi:
         if gesture_result is not None:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
-        imgui.separator()
-        imgui.text("OSC input log")
-        imgui.text_unformatted(
-            format_recent_osc_messages(self.controller.recent_osc_messages())
-        )
 
     def _hold_button(self, label: str, mode: str, *, allow_space: bool) -> None:
         from imgui_bundle import imgui
@@ -370,6 +360,11 @@ class DesktopVoiceUi:
             self._finish_recording("recognize", "overlay")
 
     def _begin_recording(self, mode: str, source: str) -> None:
+        if (
+            mode == "recognize" or mode == "test"
+        ) and not self.controller.voice_enabled:
+            self.controller.status = "Voice recognition disabled by OSC."
+            return
         recorder = self._ensure_recorder()
         if recorder is None:
             return
