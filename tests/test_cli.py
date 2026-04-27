@@ -65,6 +65,11 @@ def test_resolve_whisper_backend_name_without_loading_model() -> None:
     assert backend.name.startswith("whisper-dtw:")
 
 
+def test_resolve_faster_whisper_backend_name_without_loading_model() -> None:
+    backend = _resolve_diagnose_backends("faster-whisper-dtw", None)[0]
+    assert backend.name == "faster-whisper-dtw:tiny"
+
+
 def test_resolve_openwakeword_backend_name_without_loading_model() -> None:
     backend = _resolve_diagnose_backends("oww-dtw", None)[0]
     assert backend.name == "oww-dtw:speech_embedding"
@@ -90,5 +95,11 @@ def test_custom_calibration_prompt_plan() -> None:
 
 def test_whisper_diagnosis_uses_backend_specific_margin() -> None:
     backend = _resolve_diagnose_backends("whisper-dtw", None)[0]
+    config = _diagnose_config_for_backend(VoiceRecognitionConfig(), backend)
+    assert config.relative_margin_min == 0.15
+
+
+def test_faster_whisper_diagnosis_uses_backend_specific_margin() -> None:
+    backend = _resolve_diagnose_backends("faster-whisper-dtw", None)[0]
     config = _diagnose_config_for_backend(VoiceRecognitionConfig(), backend)
     assert config.relative_margin_min == 0.15

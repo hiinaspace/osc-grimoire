@@ -212,6 +212,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "w2vbert-mean",
             "whisper-dtw",
             "whisper-mean",
+            "faster-whisper-dtw",
             "oww-dtw",
             "oww-mean",
             "all",
@@ -802,6 +803,7 @@ def _resolve_diagnose_backends(
         "w2vbert-mean",
         "whisper-dtw",
         "whisper-mean",
+        "faster-whisper-dtw",
         "oww-dtw",
         "oww-mean",
         "all",
@@ -821,6 +823,21 @@ def _resolve_diagnose_backends(
             if backend_name == "oww-dtw":
                 return [openwakeword_dtw_backend()]
             return [openwakeword_mean_backend()]
+
+        if backend_name == "faster-whisper-dtw":
+            try:
+                from .faster_whisper_backends import (
+                    DEFAULT_FASTER_WHISPER_MODEL,
+                    faster_whisper_dtw_backend,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "faster-whisper backend module could not be imported. "
+                    "Run `uv sync`, then retry."
+                ) from exc
+
+            model = embedding_model or DEFAULT_FASTER_WHISPER_MODEL
+            return [faster_whisper_dtw_backend(model)]
 
         try:
             from .voice_embedding_backends import (
@@ -885,6 +902,7 @@ def _resolve_diagnose_backends(
                 wav2vec2_bert_mean_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
                 whisper_dtw_backend(DEFAULT_WHISPER_MODEL),
                 whisper_mean_backend(DEFAULT_WHISPER_MODEL),
+                _resolve_diagnose_backends("faster-whisper-dtw", None)[0],
                 openwakeword_dtw_backend(),
                 openwakeword_mean_backend(),
             ]
@@ -897,7 +915,7 @@ def _resolve_diagnose_backends(
 def _diagnose_config_for_backend(
     config: VoiceRecognitionConfig, backend: VoiceTemplateBackend
 ) -> VoiceRecognitionConfig:
-    if backend.name.startswith("whisper-dtw:"):
+    if backend.name.startswith(("whisper-dtw:", "faster-whisper-dtw:")):
         return replace(config, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN)
     return config
 

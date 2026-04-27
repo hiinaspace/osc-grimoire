@@ -227,6 +227,53 @@ def test_embedding_backend_missing_dependencies_message(
     _load_model.cache_clear()
 
 
+def test_faster_whisper_backend_missing_dependencies_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from osc_grimoire.faster_whisper_backends import (
+        MissingFasterWhisperDependenciesError,
+        _load_faster_whisper_model,
+        missing_faster_whisper_dependencies_message,
+    )
+
+    _load_faster_whisper_model.cache_clear()
+    original_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "faster_whisper":
+            raise ImportError("no faster-whisper")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    with pytest.raises(MissingFasterWhisperDependenciesError) as exc_info:
+        _load_faster_whisper_model("tiny")
+
+    assert str(exc_info.value) == missing_faster_whisper_dependencies_message()
+    assert "uv sync" in str(exc_info.value)
+    _load_faster_whisper_model.cache_clear()
+
+
+def test_faster_whisper_feature_extraction_pads_waveform_before_mel() -> None:
+    from osc_grimoire.faster_whisper_backends import _extract_whisper_features
+
+    class FakeFeatureExtractor:
+        n_samples = 6
+        nb_max_frames = 3
+
+        def __call__(self, audio, padding=0):
+            assert padding == 0
+            assert audio.tolist() == [1.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+            return np.asarray([[10.0, 20.0, 30.0, 40.0]], dtype=np.float32)
+
+    features = _extract_whisper_features(
+        np.asarray([1.0, 2.0], dtype=np.float32), FakeFeatureExtractor()
+    )
+
+    np.testing.assert_array_equal(
+        features, np.asarray([[10.0, 20.0, 30.0]], dtype=np.float32)
+    )
+
+
 def test_openwakeword_backend_missing_dependencies_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
