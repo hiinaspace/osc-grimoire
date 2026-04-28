@@ -815,11 +815,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "dtaidistance" },
-    { name = "faster-whisper" },
+    { name = "huggingface-hub" },
     { name = "imgui-bundle", extra = ["glfw"] },
     { name = "keyboard" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "onnx-asr" },
+    { name = "onnxruntime" },
     { name = "openvr" },
     { name = "platformdirs" },
     { name = "psutil" },
@@ -840,18 +842,19 @@ dev = [
     { name = "ty" },
 ]
 research = [
-    { name = "huggingface-hub" },
-    { name = "onnx-asr" },
+    { name = "faster-whisper" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "dtaidistance", specifier = ">=2.3.13" },
-    { name = "faster-whisper", specifier = ">=1.2.1" },
+    { name = "huggingface-hub", specifier = ">=1.2.0" },
     { name = "imgui-bundle", extras = ["glfw"], specifier = ">=1.92.0" },
     { name = "keyboard", specifier = ">=0.13.5" },
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "onnx-asr", specifier = ">=0.11.0" },
+    { name = "onnxruntime", specifier = ">=1.25.0" },
     { name = "openvr", specifier = ">=2.12.1401" },
     { name = "platformdirs", specifier = ">=4.5.0" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -869,10 +872,7 @@ dev = [
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "ty", specifier = ">=0.0.1a22" },
 ]
-research = [
-    { name = "huggingface-hub", specifier = ">=1.2.0" },
-    { name = "onnx-asr", specifier = ">=0.8.1" },
-]
+research = [{ name = "faster-whisper", specifier = ">=1.2.1" }]
 
 [[package]]
 name = "packaging"

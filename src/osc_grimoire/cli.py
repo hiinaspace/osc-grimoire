@@ -59,6 +59,7 @@ class CalibrationPrompt:
 
 LOGGER = logging.getLogger(__name__)
 WHISPER_DTW_RELATIVE_MARGIN_MIN = 0.15
+PARAKEET_CTC_RELATIVE_MARGIN_MIN = 0.20
 
 
 def cli_main(argv: Sequence[str] | None = None) -> int:
@@ -202,14 +203,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_diag.add_argument(
         "--backend",
-        default="faster-whisper-dtw",
+        default="parakeet-ctc-forced",
         choices=[
             "faster-whisper-dtw",
             "faster-whisper-nbest",
             "parakeet-ctc-forced",
             "all",
         ],
-        help="Recognizer backend to evaluate (default: faster-whisper-dtw).",
+        help="Recognizer backend to evaluate (default: parakeet-ctc-forced).",
     )
     p_diag.add_argument(
         "--embedding-model",
@@ -817,6 +818,8 @@ def _diagnose_config_for_backend(
 ) -> VoiceRecognitionConfig:
     if backend.name.startswith("faster-whisper-dtw:"):
         return replace(config, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN)
+    if backend.name.startswith("parakeet-ctc-forced:"):
+        return replace(config, relative_margin_min=PARAKEET_CTC_RELATIVE_MARGIN_MIN)
     return config
 
 

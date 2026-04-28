@@ -331,6 +331,37 @@ def test_faster_whisper_model_path_uses_repo_vendor_dir(
     assert resolved.local_files_only
 
 
+def test_parakeet_model_path_prefers_env_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from osc_grimoire.parakeet_ctc_backends import _resolve_parakeet_model
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    monkeypatch.setenv("OSC_GRIMOIRE_PARAKEET_CTC_MODEL_DIR", str(model_dir))
+
+    resolved = _resolve_parakeet_model("example/repo")
+
+    assert resolved.model_dir == model_dir
+
+
+def test_parakeet_model_path_uses_repo_vendor_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from osc_grimoire.parakeet_ctc_backends import _resolve_parakeet_model
+
+    model_dir = tmp_path / "vendor" / "models" / "parakeet-ctc-110m-int8"
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.onnx").touch()
+    (model_dir / "vocab.txt").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OSC_GRIMOIRE_PARAKEET_CTC_MODEL_DIR", raising=False)
+
+    resolved = _resolve_parakeet_model("example/repo")
+
+    assert resolved.model_dir == model_dir
+
+
 def test_nbest_text_normalization_and_similarity() -> None:
     from osc_grimoire.faster_whisper_backends import (
         NBestHypothesis,

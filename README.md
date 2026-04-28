@@ -15,7 +15,7 @@ You'll see a little overlay on your left wrist where you can train up some spell
 ## Local release build
 
 Windows release builds are PyInstaller `onedir` bundles with the
-`Systran/faster-whisper-tiny` CTranslate2 model included locally.
+`entropora/parakeet-ctc-110m-int8` ONNX model included locally.
 
 ```
 uv sync --group build

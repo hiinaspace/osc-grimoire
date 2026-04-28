@@ -28,7 +28,7 @@ Build a local recognizer that can distinguish a small user-trained spell vocabul
 
 ## Current Runtime Candidate
 
-`faster-whisper-dtw` with `Systran/faster-whisper-tiny` is the current runtime recognizer. It uses the same Whisper tiny encoder behavior through CTranslate2 without shipping PyTorch.
+`parakeet-ctc-forced` with `entropora/parakeet-ctc-110m-int8` is the current runtime recognizer candidate. It uses Parakeet 110M CTC posteriorgrams through ONNX Runtime and scores each query using CTC forced-sequence likelihood against token sequences decoded from the user's samples.
 
 Corrected held-out calibration results from `session_20260424_204205`:
 
@@ -36,7 +36,7 @@ Corrected held-out calibration results from `session_20260424_204205`:
 - `faster-whisper-nbest`: `25/60` positive hits and `0/10` false accepts at margin `0.20`; this remains weaker than frame-level Whisper DTW.
 - `parakeet-ctc-forced`: `57/60` positive hits and `0/10` false accepts from margin `0.07` through `0.20`, using Parakeet 110M INT8 CTC posteriorgrams and CTC forced-sequence scoring.
 
-The current release candidate remains `faster-whisper-dtw` because the local release flow is already built around CTranslate2. However, `parakeet-ctc-forced` is now the strongest recognition candidate on the available held-out session and is worth considering for the runtime path.
+The current release path is being switched to `parakeet-ctc-forced` because false negatives were the more problematic practical failure mode, and the Parakeet CTC scorer gives the best current held-out recognition curve.
 
 Measured local tradeoff on the corrected benchmark:
 

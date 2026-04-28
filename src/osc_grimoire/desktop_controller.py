@@ -8,7 +8,6 @@ import numpy as np
 import soundfile as sf
 
 from .config import AppConfig, VoiceRecognitionConfig
-from .faster_whisper_backends import faster_whisper_dtw_backend
 from .gesture_recognizer import (
     GestureDecision,
     GestureRanking,
@@ -42,13 +41,14 @@ from .voice_recognizer import (
     compute_backend_stats,
     compute_intra_class_median,
     decide,
+    default_voice_backend,
     rank_spells,
     recompute_spell_voice_stats,
 )
 from .waveform import load_waveform_preview
 
 DEFAULT_SAMPLE_TARGET = 10
-WHISPER_DTW_RELATIVE_MARGIN_MIN = 0.15
+PARAKEET_CTC_RELATIVE_MARGIN_MIN = 0.20
 
 
 class OutputSink(Protocol):
@@ -119,9 +119,9 @@ class VoiceTrainingController:
         self.data_dir = data_dir
         self.config = config or AppConfig()
         self.voice_config = voice_config or replace(
-            self.config.voice, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN
+            self.config.voice, relative_margin_min=PARAKEET_CTC_RELATIVE_MARGIN_MIN
         )
-        self.backend = backend or faster_whisper_dtw_backend()
+        self.backend = backend or default_voice_backend()
         self.output = output
         self.osc_input = osc_input
         self.spellbook = load_spellbook(data_dir)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ from .voice_recognizer import VoiceTemplateBackend
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PARAKEET_CTC_REPO = "entropora/parakeet-ctc-110m-int8"
+DEFAULT_PARAKEET_CTC_MODEL_DIR = "parakeet-ctc-110m-int8"
 
 
 class MissingParakeetCtcDependenciesError(RuntimeError):
@@ -35,6 +38,12 @@ class ParakeetCtcBundle:
     model_dir: Path
     asr: Any
     blank_id: int
+
+
+@dataclass(frozen=True)
+class ResolvedParakeetModel:
+    model_dir: Path | None
+    repo_id: str
 
 
 @dataclass(frozen=True)
@@ -157,9 +166,13 @@ def _load_parakeet_ctc_model(repo_id: str) -> ParakeetCtcBundle:
         ) from exc
 
     LOGGER.info("Loading Parakeet CTC model %s", repo_id)
-    model_path = Path(hf_hub_download(repo_id, "encoder.int8.onnx")).resolve()
-    tokens_path = Path(hf_hub_download(repo_id, "tokens.txt")).resolve()
-    model_dir = _materialize_onnx_asr_model_dir(model_path, tokens_path)
+    resolved = _resolve_parakeet_model(repo_id)
+    if resolved.model_dir is not None:
+        model_dir = resolved.model_dir
+    else:
+        model_path = Path(hf_hub_download(repo_id, "encoder.int8.onnx")).resolve()
+        tokens_path = Path(hf_hub_download(repo_id, "tokens.txt")).resolve()
+        model_dir = _materialize_onnx_asr_model_dir(model_path, tokens_path)
     adapter = onnx_asr.load_model(
         "nemo-conformer-ctc",
         path=model_dir,
@@ -176,6 +189,29 @@ def _load_parakeet_ctc_model(repo_id: str) -> ParakeetCtcBundle:
         asr=adapter.asr,
         blank_id=blank_id,
     )
+
+
+def _resolve_parakeet_model(repo_id: str) -> ResolvedParakeetModel:
+    override = os.environ.get("OSC_GRIMOIRE_PARAKEET_CTC_MODEL_DIR")
+    if override:
+        return ResolvedParakeetModel(Path(override), repo_id)
+    for candidate in _bundled_parakeet_model_candidates():
+        if (candidate / "model.onnx").exists() and (candidate / "vocab.txt").exists():
+            return ResolvedParakeetModel(candidate, repo_id)
+    return ResolvedParakeetModel(None, repo_id)
+
+
+def _bundled_parakeet_model_candidates() -> tuple[Path, ...]:
+    relative = Path("models") / DEFAULT_PARAKEET_CTC_MODEL_DIR
+    candidates: list[Path] = []
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        candidates.append(Path(bundle_root) / relative)
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates.append(executable_dir / relative)
+    candidates.append(Path.cwd() / "vendor" / relative)
+    candidates.append(Path(__file__).resolve().parents[2] / "vendor" / relative)
+    return tuple(candidates)
 
 
 def _materialize_onnx_asr_model_dir(model_path: Path, tokens_path: Path) -> Path:

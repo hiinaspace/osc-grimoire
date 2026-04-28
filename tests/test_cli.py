@@ -96,3 +96,9 @@ def test_faster_whisper_diagnosis_uses_backend_specific_margin() -> None:
     backend = _resolve_diagnose_backends("faster-whisper-dtw", None)[0]
     config = _diagnose_config_for_backend(VoiceRecognitionConfig(), backend)
     assert config.relative_margin_min == 0.15
+
+
+def test_parakeet_ctc_diagnosis_uses_backend_specific_margin() -> None:
+    backend = _resolve_diagnose_backends("parakeet-ctc-forced", None)[0]
+    config = _diagnose_config_for_backend(VoiceRecognitionConfig(), backend)
+    assert config.relative_margin_min == 0.20

@@ -2,16 +2,16 @@ OSC Grimoire release builds bundle third-party runtime components.
 
 Primary bundled components:
 
-- faster-whisper: MIT License
-  https://github.com/SYSTRAN/faster-whisper
+- onnx-asr: MIT License
+  https://github.com/istupakov/onnx-asr
 
-- CTranslate2: MIT License
-  https://github.com/OpenNMT/CTranslate2
+- ONNX Runtime: MIT License
+  https://onnxruntime.ai/
 
-- Whisper tiny model weights: Apache License 2.0
-  https://huggingface.co/openai/whisper-tiny
-  Release builds use the CTranslate2 conversion published as:
-  https://huggingface.co/Systran/faster-whisper-tiny
+- Parakeet CTC 110M INT8 ONNX model: CC-BY-4.0
+  https://huggingface.co/entropora/parakeet-ctc-110m-int8
+  Converted from NVIDIA Parakeet TDT/CTC 110M:
+  https://huggingface.co/nvidia/parakeet-tdt_ctc-110m
 
 - PyInstaller: GPLv2-or-later with bootloader exception
   https://pyinstaller.org/

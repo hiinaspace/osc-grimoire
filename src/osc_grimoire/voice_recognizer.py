@@ -408,6 +408,6 @@ def _distances_to_samples(
 
 
 def default_voice_backend() -> VoiceTemplateBackend:
-    from .faster_whisper_backends import faster_whisper_dtw_backend
+    from .parakeet_ctc_backends import parakeet_ctc_forced_backend
 
-    return faster_whisper_dtw_backend()
+    return parakeet_ctc_forced_backend()

@@ -8,11 +8,10 @@ binaries = []
 hiddenimports = []
 
 for package in (
-    "av",
-    "ctranslate2",
-    "faster_whisper",
     "glfw",
+    "huggingface_hub",
     "imgui_bundle",
+    "onnx_asr",
     "openvr",
     "OpenGL",
     "pythonosc",
@@ -27,9 +26,9 @@ for package in (
 
 hiddenimports += collect_submodules("osc_grimoire")
 
-model_dir = Path("vendor/models/faster-whisper-tiny")
+model_dir = Path("vendor/models/parakeet-ctc-110m-int8")
 if model_dir.exists():
-    datas.append((str(model_dir), "models/faster-whisper-tiny"))
+    datas.append((str(model_dir), "models/parakeet-ctc-110m-int8"))
 datas.append(("THIRD_PARTY_NOTICES.txt", "."))
 
 

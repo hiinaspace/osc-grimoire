@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
 import re
@@ -143,13 +144,14 @@ def _extract_faster_whisper_nbest(
 
 def _generate_nbest_hypotheses(model: Any, encoded_features: Any) -> NBestFeature:
     try:
-        from faster_whisper.tokenizer import Tokenizer
+        tokenizer_module = importlib.import_module("faster_whisper.tokenizer")
     except ImportError as exc:
         raise MissingFasterWhisperDependenciesError(
             missing_faster_whisper_dependencies_message()
         ) from exc
+    tokenizer_class = getattr(tokenizer_module, "Tokenizer")
 
-    tokenizer = Tokenizer(
+    tokenizer = tokenizer_class(
         model.hf_tokenizer,
         model.model.is_multilingual,
         task="transcribe",
@@ -213,15 +215,16 @@ def _extract_whisper_features(audio: FloatArray, feature_extractor: Any) -> Floa
 @functools.lru_cache(maxsize=4)
 def _load_faster_whisper_model(model_name: str) -> FasterWhisperBundle:
     try:
-        from faster_whisper import WhisperModel
+        faster_whisper = importlib.import_module("faster_whisper")
     except ImportError as exc:
         raise MissingFasterWhisperDependenciesError(
             missing_faster_whisper_dependencies_message()
         ) from exc
+    whisper_model = getattr(faster_whisper, "WhisperModel")
 
     LOGGER.info("Loading faster-whisper model %s", model_name)
     resolved = _resolve_model_path(model_name)
-    model = WhisperModel(
+    model = whisper_model(
         str(resolved.model_path),
         device="cpu",
         compute_type=DEFAULT_FASTER_WHISPER_COMPUTE_TYPE,
