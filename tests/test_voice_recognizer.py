@@ -14,6 +14,7 @@ from osc_grimoire.spellbook import (
 )
 from osc_grimoire.voice_recognizer import (
     SpellRanking,
+    VoiceTemplateBackend,
     compute_intra_class_median,
     decide,
     rank_spells,
@@ -31,9 +32,19 @@ def _ranking(name: str, agg: float, intra: float | None) -> SpellRanking:
     )
 
 
-def _stub_features(seed: int, frames: int = 64, n_mfcc: int = 13) -> np.ndarray:
+def _stub_features(seed: int, frames: int = 64, dimensions: int = 13) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    return rng.standard_normal((frames, n_mfcc)).astype(np.float32)
+    return rng.standard_normal((frames, dimensions)).astype(np.float32)
+
+
+def _fake_backend() -> VoiceTemplateBackend:
+    return VoiceTemplateBackend(
+        name="fake",
+        extract_path=lambda _path, _config: _stub_features(0),
+        extract_array=lambda audio, _config, _sample_rate: audio,
+        distance=lambda a, b: float(np.linalg.norm(a - b)),
+        aggregate=lambda distances: float(np.median(distances)),
+    )
 
 
 def _spell_with_samples(book, name: str, n_samples: int, sample_features: np.ndarray):
@@ -61,7 +72,9 @@ def test_rank_spells_identifies_correct_spell(tmp_path: Path) -> None:
 
     config = VoiceRecognitionConfig()
 
-    rankings = rank_spells(feat_a, book, config, feature_cache=cache)
+    rankings = rank_spells(
+        feat_a, book, config, feature_cache=cache, backend=_fake_backend()
+    )
     assert rankings[0].spell_id == spell_a.id
     assert rankings[0].aggregate_distance == 0.0
     assert rankings[1].spell_id == spell_b.id
@@ -69,12 +82,12 @@ def test_rank_spells_identifies_correct_spell(tmp_path: Path) -> None:
 
 
 def test_compute_intra_class_median_returns_none_for_one_sample() -> None:
-    assert compute_intra_class_median([_stub_features(0)]) is None
+    assert compute_intra_class_median([_stub_features(0)], _fake_backend()) is None
 
 
 def test_compute_intra_class_median_positive_for_distinct_samples() -> None:
     feats = [_stub_features(i) for i in range(4)]
-    median = compute_intra_class_median(feats)
+    median = compute_intra_class_median(feats, _fake_backend())
     assert median is not None
     assert median > 0.0
 
@@ -158,7 +171,11 @@ def test_recompute_spell_voice_stats_with_synthetic_features(tmp_path: Path) -> 
         cache[abs_path] = f
 
     book = recompute_spell_voice_stats(
-        book, spell, VoiceRecognitionConfig(), feature_cache=cache
+        book,
+        spell,
+        VoiceRecognitionConfig(),
+        feature_cache=cache,
+        backend=_fake_backend(),
     )
     fresh = next(s for s in book.spells if s.id == spell.id)
     assert fresh.intra_class_median is not None

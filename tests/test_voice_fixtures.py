@@ -1,24 +1,26 @@
-"""Regression test against committed real-voice fixtures.
+"""Optional regression test against committed real-voice fixtures.
 
-These clips are the user's own training samples; if MFCC+DTW degrades on them,
-the test catches it without needing a microphone.
+These clips are the user's own training samples. The active recognizer uses a
+bundled/downloaded model, so these tests are opt-in to keep normal unit tests
+offline and fast.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from osc_grimoire.config import VoiceRecognitionConfig
+from osc_grimoire.faster_whisper_backends import faster_whisper_dtw_backend
 from osc_grimoire.spellbook import (
     Spellbook,
     add_voice_sample,
     create_spell,
     load_spellbook,
 )
-from osc_grimoire.voice_features import extract_mfcc
 from osc_grimoire.voice_recognizer import (
     decide,
     leave_one_out_eval,
@@ -64,13 +66,21 @@ def _has_fixtures() -> bool:
     return FIXTURE_ROOT.exists() and any(FIXTURE_ROOT.iterdir())
 
 
-@pytest.mark.skipif(not _has_fixtures(), reason="no voice fixtures committed")
+def _run_model_fixture_tests() -> bool:
+    return os.environ.get("OSC_GRIMOIRE_RUN_MODEL_TESTS") == "1"
+
+
+@pytest.mark.skipif(
+    not (_has_fixtures() and _run_model_fixture_tests()),
+    reason="voice model fixture tests are opt-in",
+)
 def test_leave_one_out_classifies_all_fixtures(tmp_path: Path) -> None:
     book = _build_spellbook_from_fixtures(tmp_path)
     config = VoiceRecognitionConfig()
-    book = recompute_all(book, config)
+    backend = faster_whisper_dtw_backend()
+    book = recompute_all(book, config, backend)
 
-    results = leave_one_out_eval(book, config)
+    results = leave_one_out_eval(book, config, backend)
     assert results, "fixtures present but no LOO results produced"
 
     incorrect = [r for r in results if not r.correct]
@@ -94,20 +104,24 @@ def test_leave_one_out_classifies_all_fixtures(tmp_path: Path) -> None:
             )
 
 
-@pytest.mark.skipif(not _has_fixtures(), reason="no voice fixtures committed")
+@pytest.mark.skipif(
+    not (_has_fixtures() and _run_model_fixture_tests()),
+    reason="voice model fixture tests are opt-in",
+)
 def test_query_each_fixture_recognizes_self(tmp_path: Path) -> None:
     """A non-LOO sanity check: querying a fixture against the full spellbook
     (which contains that fixture) must rank its own spell first with both gates
     passing easily."""
     book = _build_spellbook_from_fixtures(tmp_path)
     config = VoiceRecognitionConfig()
-    book = recompute_all(book, config)
+    backend = faster_whisper_dtw_backend()
+    book = recompute_all(book, config, backend)
 
     for spell_dir in sorted(p for p in FIXTURE_ROOT.iterdir() if p.is_dir()):
         clips = _audio_files(spell_dir, "voice_")
         for clip in clips:
-            query = extract_mfcc(clip, config)
-            ranking = rank_spells(query, book, config)
+            query = backend.extract_path(clip, config)
+            ranking = rank_spells(query, book, config, backend=backend)
             assert ranking, "no rankable spells"
             assert ranking[0].name == spell_dir.name, (
                 f"{clip.name}: ranked {ranking[0].name} first, expected {spell_dir.name}"
@@ -123,18 +137,19 @@ def _has_negatives() -> bool:
 
 
 @pytest.mark.skipif(
-    not (_has_fixtures() and _has_negatives()),
-    reason="no negative fixtures committed",
+    not (_has_fixtures() and _has_negatives() and _run_model_fixture_tests()),
+    reason="voice model fixture tests are opt-in",
 )
 def test_negatives_are_rejected(tmp_path: Path) -> None:
     book = _build_spellbook_from_fixtures(tmp_path)
     config = VoiceRecognitionConfig()
-    book = recompute_all(book, config)
+    backend = faster_whisper_dtw_backend()
+    book = recompute_all(book, config, backend)
 
     accepted_negatives = []
     for clip in _audio_files(NEGATIVES_ROOT):
-        query = extract_mfcc(clip, config)
-        ranking = rank_spells(query, book, config)
+        query = backend.extract_path(clip, config)
+        ranking = rank_spells(query, book, config, backend=backend)
         decision = decide(ranking, config)
         if decision.accepted:
             accepted_negatives.append(

@@ -8,6 +8,7 @@ import numpy as np
 import soundfile as sf
 
 from .config import AppConfig, VoiceRecognitionConfig
+from .faster_whisper_backends import faster_whisper_dtw_backend
 from .gesture_recognizer import (
     GestureDecision,
     GestureRanking,
@@ -31,12 +32,12 @@ from .spellbook import (
     set_gesture_sample,
     voice_sample_abs_paths,
 )
-from .voice_embedding_backends import whisper_dtw_backend
 from .voice_features import FloatArray, trim_voice_audio
 from .voice_recognizer import (
     BackendStats,
     Decision,
     SpellRanking,
+    VoiceFeature,
     VoiceTemplateBackend,
     compute_backend_stats,
     compute_intra_class_median,
@@ -120,7 +121,7 @@ class VoiceTrainingController:
         self.voice_config = voice_config or replace(
             self.config.voice, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN
         )
-        self.backend = backend or whisper_dtw_backend()
+        self.backend = backend or faster_whisper_dtw_backend()
         self.output = output
         self.osc_input = osc_input
         self.spellbook = load_spellbook(data_dir)
@@ -132,7 +133,7 @@ class VoiceTrainingController:
         self.armed_gesture_spell_id: str | None = None
         self.recent_query_vectors: list[tuple[FloatArray, Decision, str]] = []
         self._backend_stats: BackendStats | None = None
-        self._feature_cache: dict[Path, FloatArray] | None = None
+        self._feature_cache: dict[Path, VoiceFeature] | None = None
 
     @property
     def output_status(self) -> str | None:
@@ -346,8 +347,9 @@ class VoiceTrainingController:
         )
         self.last_result = result
         best_name = ranking[0].name if ranking else "(none)"
-        self.recent_query_vectors.append((_mean_vector(query), decision, best_name))
-        self.recent_query_vectors = self.recent_query_vectors[-8:]
+        if isinstance(query, np.ndarray):
+            self.recent_query_vectors.append((_mean_vector(query), decision, best_name))
+            self.recent_query_vectors = self.recent_query_vectors[-8:]
         self.status = "Accepted." if decision.accepted else "Rejected."
         self._emit_recognition_result(result)
         return result
@@ -361,8 +363,9 @@ class VoiceTrainingController:
                 features = feature_cache.get(path)
                 if features is None:
                     continue
-                vectors.append(_mean_vector(features))
-                metadata.append((spell.name, "sample", None, 0))
+                if isinstance(features, np.ndarray):
+                    vectors.append(_mean_vector(features))
+                    metadata.append((spell.name, "sample", None, 0))
 
         history_count = len(self.recent_query_vectors)
         for index, (vector, decision, best_name) in enumerate(
@@ -413,7 +416,7 @@ class VoiceTrainingController:
         spell = self._spell_or_raise(spell_id)
         return recompute_spell_voice_stats(self.spellbook, spell, self.config.voice)
 
-    def _recognition_cache(self) -> tuple[BackendStats, dict[Path, FloatArray]]:
+    def _recognition_cache(self) -> tuple[BackendStats, dict[Path, VoiceFeature]]:
         if self._backend_stats is None or self._feature_cache is None:
             self._backend_stats, self._feature_cache = compute_backend_stats(
                 self.spellbook, self.voice_config, self.backend

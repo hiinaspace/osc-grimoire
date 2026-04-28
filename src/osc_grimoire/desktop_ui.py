@@ -646,7 +646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     osc_input = OscInputService(controller.config.osc)
     osc_input.start()
     controller.osc_input = osc_input
-    controller.status = "Loading Whisper model..."
+    controller.status = "Loading voice model..."
     controller.preload_backend()
     controller.status = "Ready."
     app = DesktopVoiceUi(controller)

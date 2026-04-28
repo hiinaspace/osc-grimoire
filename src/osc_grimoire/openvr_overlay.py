@@ -222,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     controller = VoiceTrainingController(
         data_dir, config=config, output=osc_output, osc_input=osc_input
     )
-    controller.status = "Loading Whisper model..."
+    controller.status = "Loading voice model..."
     controller.preload_backend()
     controller.status = "Starting OpenVR overlay..."
     app = DesktopVoiceUi(

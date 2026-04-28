@@ -12,16 +12,7 @@ class AudioConfig:
 
 @dataclass(frozen=True)
 class VoiceRecognitionConfig:
-    n_mfcc: int = 13
     trim_top_db: float = 30.0
-    # Drop MFCC C0. It mostly carries broad energy/spectral-envelope level, and
-    # in this tiny-vocabulary setup it made short negatives like "yes" look too
-    # much like valid one-word spells.
-    drop_mfcc_c0: bool = True
-    # Normalize each clip's cepstral features independently. This makes DTW
-    # compare the shape/dynamics of the utterance more than recording loudness
-    # or mic distance.
-    cepstral_normalize: bool = True
     # Garbage gate: accept only if best DTW <= ratio_max * intra_class_median(best_spell).
     intra_class_ratio_max: float = 2.5
     # Confusion gate: accept only if (second - best) / second >= margin_min.

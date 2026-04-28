@@ -12,6 +12,19 @@ uvx git+https://github.com/hiinaspace/osc-grimoire
 
 You'll see a little overlay on your left wrist where you can train up some spells.
 
+## Local release build
+
+Windows release builds are PyInstaller `onedir` bundles with the
+`Systran/faster-whisper-tiny` CTranslate2 model included locally.
+
+```
+uv sync --group build
+.\scripts\build_release.ps1
+```
+
+The build writes `dist\osc-grimoire-windows.zip`. The unpacked executable is
+`dist\osc-grimoire\osc-grimoire-overlay.exe`.
+
 ### Didst thou consort with demons to make this?
 
 I am the bone of my slop, etc, etc

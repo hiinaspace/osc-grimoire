@@ -37,10 +37,10 @@ from .spellbook import (
 )
 from .voice_features import trim_voice_audio
 from .voice_recognizer import (
-    MFCC_DTW_BACKEND,
     SpellRanking,
     VoiceTemplateBackend,
     decide,
+    default_voice_backend,
     leave_one_out_eval,
     rank_spells,
     recompute_all,
@@ -201,28 +201,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_diag.add_argument(
         "--backend",
-        default="mfcc-dtw",
-        choices=[
-            "mfcc-dtw",
-            "wavlm-dtw",
-            "wavlm-mean",
-            "conformer-dtw",
-            "conformer-mean",
-            "w2vbert-dtw",
-            "w2vbert-mean",
-            "whisper-dtw",
-            "whisper-mean",
-            "faster-whisper-dtw",
-            "oww-dtw",
-            "oww-mean",
-            "all",
-        ],
-        help="Recognizer backend to evaluate (default: mfcc-dtw).",
+        default="faster-whisper-dtw",
+        choices=["faster-whisper-dtw", "faster-whisper-nbest", "all"],
+        help="Recognizer backend to evaluate (default: faster-whisper-dtw).",
     )
     p_diag.add_argument(
         "--embedding-model",
         default=None,
-        help="Hugging Face model for neural embedding backends.",
+        help="faster-whisper model name or local path.",
     )
     p_diag.add_argument(
         "--plot-dir",
@@ -413,6 +399,7 @@ def _cmd_recognize(_args: argparse.Namespace, config: AppConfig, data_dir: Path)
 
     print(f"Hold '{config.hotkey}' and speak. Release to classify. Ctrl-C to quit.")
     feature_cache: dict[Path, np.ndarray] = {}
+    backend = default_voice_backend()
 
     with PushToTalkRecorder(
         config.audio, hotkey=config.hotkey, on_state_change=_print_recording_state
@@ -425,7 +412,7 @@ def _cmd_recognize(_args: argparse.Namespace, config: AppConfig, data_dir: Path)
                     continue
                 duration = audio.size / config.audio.sample_rate
                 print(f"  captured {duration:.2f}s of audio")
-                query = MFCC_DTW_BACKEND.extract_array(
+                query = backend.extract_array(
                     audio, config.voice, config.audio.sample_rate
                 )
                 ranking = rank_spells(
@@ -433,7 +420,7 @@ def _cmd_recognize(_args: argparse.Namespace, config: AppConfig, data_dir: Path)
                     spellbook,
                     config.voice,
                     feature_cache,
-                    backend=MFCC_DTW_BACKEND,
+                    backend=backend,
                 )
                 if not ranking:
                     print("  no rankable spells")
@@ -630,9 +617,7 @@ def _cmd_calibrate(args: argparse.Namespace, config: AppConfig, data_dir: Path) 
                 examples.append(example)
 
     write_calibration_metadata(session_dir, examples)
-    report = diagnose_calibration_session(
-        session_dir, spellbook, config.voice, MFCC_DTW_BACKEND
-    )
+    report = diagnose_calibration_session(session_dir, spellbook, config.voice)
     _print_calibration_report(report)
     return 0
 
@@ -791,131 +776,29 @@ def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -
 def _resolve_diagnose_backends(
     backend_name: str, embedding_model: str | None
 ) -> list[VoiceTemplateBackend]:
-    if backend_name == "mfcc-dtw":
-        return [MFCC_DTW_BACKEND]
+    if backend_name not in {"faster-whisper-dtw", "faster-whisper-nbest", "all"}:
+        raise RuntimeError(f"Unknown backend {backend_name!r}")
+    from .faster_whisper_backends import (
+        DEFAULT_FASTER_WHISPER_MODEL,
+        faster_whisper_dtw_backend,
+        faster_whisper_nbest_backend,
+    )
 
-    if backend_name in {
-        "wavlm-dtw",
-        "wavlm-mean",
-        "conformer-dtw",
-        "conformer-mean",
-        "w2vbert-dtw",
-        "w2vbert-mean",
-        "whisper-dtw",
-        "whisper-mean",
-        "faster-whisper-dtw",
-        "oww-dtw",
-        "oww-mean",
-        "all",
-    }:
-        if backend_name in {"oww-dtw", "oww-mean"}:
-            try:
-                from .openwakeword_backends import (
-                    openwakeword_dtw_backend,
-                    openwakeword_mean_backend,
-                )
-            except ImportError as exc:
-                raise RuntimeError(
-                    "OpenWakeWord backend module could not be imported. "
-                    "Run `uv sync --group oww`, then retry."
-                ) from exc
-
-            if backend_name == "oww-dtw":
-                return [openwakeword_dtw_backend()]
-            return [openwakeword_mean_backend()]
-
-        if backend_name == "faster-whisper-dtw":
-            try:
-                from .faster_whisper_backends import (
-                    DEFAULT_FASTER_WHISPER_MODEL,
-                    faster_whisper_dtw_backend,
-                )
-            except ImportError as exc:
-                raise RuntimeError(
-                    "faster-whisper backend module could not be imported. "
-                    "Run `uv sync`, then retry."
-                ) from exc
-
-            model = embedding_model or DEFAULT_FASTER_WHISPER_MODEL
-            return [faster_whisper_dtw_backend(model)]
-
-        try:
-            from .voice_embedding_backends import (
-                DEFAULT_CONFORMER_MODEL,
-                DEFAULT_EMBEDDING_MODEL,
-                DEFAULT_WAV2VEC2_BERT_MODEL,
-                DEFAULT_WHISPER_MODEL,
-                MissingEmbeddingDependenciesError,
-                conformer_dtw_backend,
-                conformer_mean_backend,
-                missing_embedding_dependencies_message,
-                wav2vec2_bert_dtw_backend,
-                wav2vec2_bert_mean_backend,
-                wavlm_dtw_backend,
-                wavlm_mean_backend,
-                whisper_dtw_backend,
-                whisper_mean_backend,
-            )
-        except ImportError as exc:
-            raise RuntimeError(
-                "Embedding backend module could not be imported. "
-                "Run `uv sync --group ml`, then retry."
-            ) from exc
-
-        if backend_name == "wavlm-dtw":
-            model = embedding_model or DEFAULT_EMBEDDING_MODEL
-            return [wavlm_dtw_backend(model)]
-        if backend_name == "wavlm-mean":
-            model = embedding_model or DEFAULT_EMBEDDING_MODEL
-            return [wavlm_mean_backend(model)]
-        if backend_name == "conformer-dtw":
-            model = embedding_model or DEFAULT_CONFORMER_MODEL
-            return [conformer_dtw_backend(model)]
-        if backend_name == "conformer-mean":
-            model = embedding_model or DEFAULT_CONFORMER_MODEL
-            return [conformer_mean_backend(model)]
-        if backend_name == "w2vbert-dtw":
-            model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
-            return [wav2vec2_bert_dtw_backend(model)]
-        if backend_name == "w2vbert-mean":
-            model = embedding_model or DEFAULT_WAV2VEC2_BERT_MODEL
-            return [wav2vec2_bert_mean_backend(model)]
-        if backend_name == "whisper-dtw":
-            model = embedding_model or DEFAULT_WHISPER_MODEL
-            return [whisper_dtw_backend(model)]
-        if backend_name == "whisper-mean":
-            model = embedding_model or DEFAULT_WHISPER_MODEL
-            return [whisper_mean_backend(model)]
-        try:
-            from .openwakeword_backends import (
-                openwakeword_dtw_backend,
-                openwakeword_mean_backend,
-            )
-
-            return [
-                MFCC_DTW_BACKEND,
-                wavlm_dtw_backend(DEFAULT_EMBEDDING_MODEL),
-                wavlm_mean_backend(DEFAULT_EMBEDDING_MODEL),
-                conformer_dtw_backend(DEFAULT_CONFORMER_MODEL),
-                conformer_mean_backend(DEFAULT_CONFORMER_MODEL),
-                wav2vec2_bert_dtw_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
-                wav2vec2_bert_mean_backend(DEFAULT_WAV2VEC2_BERT_MODEL),
-                whisper_dtw_backend(DEFAULT_WHISPER_MODEL),
-                whisper_mean_backend(DEFAULT_WHISPER_MODEL),
-                _resolve_diagnose_backends("faster-whisper-dtw", None)[0],
-                openwakeword_dtw_backend(),
-                openwakeword_mean_backend(),
-            ]
-        except MissingEmbeddingDependenciesError as exc:
-            raise RuntimeError(missing_embedding_dependencies_message()) from exc
-
-    raise RuntimeError(f"Unknown backend {backend_name!r}")
+    model = embedding_model or DEFAULT_FASTER_WHISPER_MODEL
+    if backend_name == "faster-whisper-dtw":
+        return [faster_whisper_dtw_backend(model)]
+    if backend_name == "faster-whisper-nbest":
+        return [faster_whisper_nbest_backend(model)]
+    return [
+        faster_whisper_dtw_backend(model),
+        faster_whisper_nbest_backend(model),
+    ]
 
 
 def _diagnose_config_for_backend(
     config: VoiceRecognitionConfig, backend: VoiceTemplateBackend
 ) -> VoiceRecognitionConfig:
-    if backend.name.startswith(("whisper-dtw:", "faster-whisper-dtw:")):
+    if backend.name.startswith("faster-whisper-dtw:"):
         return replace(config, relative_margin_min=WHISPER_DTW_RELATIVE_MARGIN_MIN)
     return config
 

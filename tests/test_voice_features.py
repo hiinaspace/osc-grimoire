@@ -7,8 +7,8 @@ import soundfile as sf
 
 from osc_grimoire.config import VoiceRecognitionConfig
 from osc_grimoire.voice_features import (
-    extract_mfcc,
-    extract_mfcc_from_array,
+    load_audio_mono,
+    resample_audio,
     trim_voice_audio,
 )
 
@@ -20,33 +20,28 @@ def _sine_wave(
     return (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
 
 
-def test_extract_mfcc_from_wav(tmp_path: Path) -> None:
-    sr = 16000
-    audio = _sine_wave(440.0, 1.0, sr)
+def test_load_audio_mono_resamples_wav(tmp_path: Path) -> None:
+    source_rate = 8000
+    audio = _sine_wave(440.0, 0.25, source_rate)
+    stereo = np.column_stack([audio, audio * 0.5])
     wav_path = tmp_path / "tone.wav"
-    sf.write(str(wav_path), audio, sr)
+    sf.write(str(wav_path), stereo, source_rate)
 
-    config = VoiceRecognitionConfig()
-    features = extract_mfcc(wav_path, config, sample_rate=sr)
-    assert features.ndim == 2
-    expected_coefficients = config.n_mfcc - (1 if config.drop_mfcc_c0 else 0)
-    assert features.shape[1] == expected_coefficients
-    assert features.dtype == np.float32
-    assert features.shape[0] > 0
+    loaded = load_audio_mono(wav_path, sample_rate=16000)
+
+    assert loaded.dtype == np.float32
+    assert loaded.ndim == 1
+    assert abs(loaded.shape[0] - 4000) <= 1
+    assert np.max(np.abs(loaded)) > 0.0
 
 
-def test_extract_mfcc_from_array_matches_wav(tmp_path: Path) -> None:
-    sr = 16000
-    audio = _sine_wave(880.0, 1.0, sr)
-    wav_path = tmp_path / "tone.wav"
-    sf.write(str(wav_path), audio, sr)
+def test_resample_audio_preserves_duration() -> None:
+    audio = _sine_wave(440.0, 0.5, 8000)
 
-    config = VoiceRecognitionConfig()
-    from_wav = extract_mfcc(wav_path, config, sample_rate=sr)
-    from_array = extract_mfcc_from_array(audio, config, sample_rate=sr)
-    assert from_wav.shape == from_array.shape
-    # WAV round-trip introduces ~1e-2 float32 noise; coefficients are O(100).
-    np.testing.assert_allclose(from_wav, from_array, atol=0.1)
+    resampled = resample_audio(audio, source_rate=8000, target_rate=16000)
+
+    assert resampled.dtype == np.float32
+    assert resampled.shape == (8000,)
 
 
 def test_trim_voice_audio_removes_leading_and_trailing_silence() -> None:
@@ -58,3 +53,22 @@ def test_trim_voice_audio_removes_leading_and_trailing_silence() -> None:
     trimmed = trim_voice_audio(audio, VoiceRecognitionConfig())
 
     assert 0 < trimmed.size < audio.size
+
+
+def test_trim_voice_audio_uses_librosa_style_frame_indices() -> None:
+    config = VoiceRecognitionConfig(trim_top_db=30.0)
+    silence = np.zeros(1024, dtype=np.float32)
+    tone = np.ones(4096, dtype=np.float32) * 0.25
+    audio = np.concatenate([silence, tone, silence])
+
+    trimmed = trim_voice_audio(audio, config)
+
+    np.testing.assert_array_equal(trimmed, audio[512:6144])
+
+
+def test_trim_voice_audio_keeps_all_silence() -> None:
+    audio = np.zeros(1000, dtype=np.float32)
+
+    trimmed = trim_voice_audio(audio, VoiceRecognitionConfig())
+
+    np.testing.assert_array_equal(trimmed, audio)

@@ -11,13 +11,9 @@ dependencies = [
     "sounddevice>=0.5.0",
     "soundfile>=0.13.0",
     "numpy>=2.0",
-    "scipy>=1.15.0",
-    "librosa>=0.11.0",
     "dtaidistance>=2.3.13",
     "keyboard>=0.13.5",
     "platformdirs>=4.5.0",
-    "torch>=2.9.0",
-    "transformers>=4.57.0",
     "matplotlib>=3.10.0",
     "psutil>=7.0.0",
     "imgui-bundle[glfw]>=1.92.0",
@@ -38,18 +34,14 @@ requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+build = [
+    "pyinstaller>=6.20.0",
+]
 dev = [
     "pytest>=8.4.0",
     "ruff>=0.15.0",
     "ty>=0.0.1a22",
 ]
-oww = [
-    "onnxruntime>=1.23.0",
-    "requests>=2.0",
-    "scikit-learn>=1.0",
-    "tqdm>=4.0",
-]
-
 [tool.ruff]
 line-length = 88
 target-version = "py313"

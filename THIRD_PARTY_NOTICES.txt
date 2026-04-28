@@ -1,0 +1,21 @@
+OSC Grimoire release builds bundle third-party runtime components.
+
+Primary bundled components:
+
+- faster-whisper: MIT License
+  https://github.com/SYSTRAN/faster-whisper
+
+- CTranslate2: MIT License
+  https://github.com/OpenNMT/CTranslate2
+
+- Whisper tiny model weights: Apache License 2.0
+  https://huggingface.co/openai/whisper-tiny
+  Release builds use the CTranslate2 conversion published as:
+  https://huggingface.co/Systran/faster-whisper-tiny
+
+- PyInstaller: GPLv2-or-later with bootloader exception
+  https://pyinstaller.org/
+
+Additional Python packages bundled by PyInstaller retain their upstream
+licenses. See the package metadata included in the built distribution for the
+complete dependency set.

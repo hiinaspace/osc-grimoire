@@ -7,13 +7,13 @@ from pathlib import Path
 
 from .config import VoiceRecognitionConfig
 from .spellbook import Spellbook
-from .voice_features import FloatArray
 from .voice_recognizer import (
-    MFCC_DTW_BACKEND,
     BackendStats,
+    VoiceFeature,
     VoiceTemplateBackend,
     compute_backend_stats,
     decide,
+    default_voice_backend,
     rank_spells,
 )
 
@@ -141,7 +141,7 @@ def diagnose_calibration_session(
     session_dir: Path,
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    backend: VoiceTemplateBackend | None = None,
     margin_values: tuple[float, ...] = (
         0.00,
         0.03,
@@ -156,6 +156,7 @@ def diagnose_calibration_session(
         0.50,
     ),
 ) -> CalibrationReport:
+    backend = backend or default_voice_backend()
     examples = load_calibration_examples(session_dir)
     peak_rss_mb = _current_rss_mb()
     backend_stats, feature_cache = compute_backend_stats(spellbook, config, backend)
@@ -200,7 +201,7 @@ def _diagnose_example(
     config: VoiceRecognitionConfig,
     backend: VoiceTemplateBackend,
     backend_stats: BackendStats,
-    feature_cache: dict[Path, FloatArray],
+    feature_cache: dict[Path, VoiceFeature],
 ) -> ExampleDiagnosis:
     start = time.perf_counter()
     query = backend.extract_path(example.path, config)

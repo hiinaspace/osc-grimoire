@@ -23,10 +23,11 @@ Build a local recognizer that can distinguish a small user-trained spell vocabul
 - Wav2Vec2-BERT and large Wav2Vec2-Conformer models did not justify their memory and latency cost in the current harness.
 - OpenWakeWord's shared `speech_embedding` ONNX feature extractor is fast and lightweight, but performed worse than WavLM and Whisper on this vocabulary. It remains useful as a deployment reference, not the leading recognizer.
 - Whisper encoder frame embeddings with DTW performed best. `openai/whisper-tiny` matched or beat larger variants on the recorded sets while staying smaller and faster.
+- A follow-up diagnostic spike adds `faster-whisper-nbest`, which compares CTranslate2 beam hypotheses instead of encoder frames. CTranslate2 exposes multiple decoded sequences with `num_hypotheses`; the spike treats those as a weighted bag of plausible phonetic/text interpretations for each sample.
 
-## Current Best Candidate
+## Current Runtime Candidate
 
-`whisper-dtw` with `openai/whisper-tiny` is the best milestone-one recognizer candidate.
+`faster-whisper-dtw` with `Systran/faster-whisper-tiny` is the current runtime recognizer. It uses the same Whisper tiny encoder behavior through CTranslate2 without shipping PyTorch.
 
 Observed calibration results:
 
@@ -34,7 +35,14 @@ Observed calibration results:
 - Variant session with clean/quiet/slow/fast delivery: `53/60` positive hits at `0/10` false accepts with `relative_margin_min=0.15`.
 - At the previous `0.20` margin, the variant session dropped to `44/60` positive hits, mostly from fast delivery.
 
-The current candidate threshold for `whisper-dtw` is therefore `relative_margin_min=0.15`. MFCC+DTW should remain more conservative until replaced or separately calibrated.
+The current candidate threshold for Whisper DTW is therefore `relative_margin_min=0.15`.
+
+The full research backend spike, including MFCC, WavLM, Wav2Vec2, OpenWakeWord, Transformers Whisper, and faster-whisper comparison code, is preserved in git at commit `87e579f` (`Add faster-whisper diagnostic backend`).
+
+## Open Questions
+
+- `faster-whisper-nbest` tests whether user-trained spells can be represented by overlapping beam hypotheses such as `alohomora`, `aloha mora`, or similar token sequences. This may help where Whisper already knows a stable near-text interpretation, but it may fail for common English phrases or for nonsense words that decode inconsistently.
+- A later CTC/posteriorgram spike is still plausible. Parakeet/FastConformer-style models may expose frame-level token distributions closer to the speech recognizer's timing-invariant layer, but they should remain optional research dependencies until they beat the current tiny CTranslate2 runtime path.
 
 ## UX Implications
 

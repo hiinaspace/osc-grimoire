@@ -7,9 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
-
-import numpy as np
-from dtaidistance import dtw_ndim
+from typing import Any
 
 from .config import VoiceRecognitionConfig
 from .spellbook import (
@@ -18,7 +16,9 @@ from .spellbook import (
     replace_spell,
     voice_sample_abs_paths,
 )
-from .voice_features import FloatArray, extract_mfcc, extract_mfcc_from_array
+from .voice_features import FloatArray
+
+VoiceFeature = Any
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,29 +26,10 @@ LOGGER = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class VoiceTemplateBackend:
     name: str
-    extract_path: Callable[[Path, VoiceRecognitionConfig], FloatArray]
-    extract_array: Callable[[FloatArray, VoiceRecognitionConfig, int], FloatArray]
-    distance: Callable[[FloatArray, FloatArray], float]
+    extract_path: Callable[[Path, VoiceRecognitionConfig], VoiceFeature]
+    extract_array: Callable[[FloatArray, VoiceRecognitionConfig, int], VoiceFeature]
+    distance: Callable[[VoiceFeature, VoiceFeature], float]
     aggregate: Callable[[list[float]], float]
-
-
-def _dtw_distance(a: FloatArray, b: FloatArray) -> float:
-    a64 = np.ascontiguousarray(a, dtype=np.float64)
-    b64 = np.ascontiguousarray(b, dtype=np.float64)
-    return float(dtw_ndim.distance(a64, b64))
-
-
-def _median_distance(distances: list[float]) -> float:
-    return float(statistics.median(distances))
-
-
-MFCC_DTW_BACKEND = VoiceTemplateBackend(
-    name="mfcc_dtw",
-    extract_path=extract_mfcc,
-    extract_array=extract_mfcc_from_array,
-    distance=_dtw_distance,
-    aggregate=_median_distance,
-)
 
 
 @dataclass(frozen=True)
@@ -91,13 +72,14 @@ class LooResult:
 
 
 def rank_spells(
-    query: FloatArray,
+    query: VoiceFeature,
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
-    feature_cache: dict[Path, FloatArray] | None = None,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    feature_cache: dict[Path, VoiceFeature] | None = None,
+    backend: VoiceTemplateBackend | None = None,
     backend_stats: BackendStats | None = None,
 ) -> list[SpellRanking]:
+    backend = backend or default_voice_backend()
     rankings: list[SpellRanking] = []
     for spell in spellbook.spells:
         if not spell.enabled or not spell.has_voice:
@@ -203,9 +185,10 @@ def decide(
 
 
 def compute_intra_class_median(
-    features_list: list[FloatArray],
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    features_list: list[VoiceFeature],
+    backend: VoiceTemplateBackend | None = None,
 ) -> float | None:
+    backend = backend or default_voice_backend()
     if len(features_list) < 2:
         return None
     distances: list[float] = []
@@ -218,16 +201,17 @@ def recompute_spell_voice_stats(
     spellbook: Spellbook,
     spell: Spell,
     config: VoiceRecognitionConfig,
-    feature_cache: dict[Path, FloatArray] | None = None,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    feature_cache: dict[Path, VoiceFeature] | None = None,
+    backend: VoiceTemplateBackend | None = None,
 ) -> Spellbook:
+    backend = backend or default_voice_backend()
     # Look up the current spell by id so a stale `spell` value doesn't wipe
     # out voice_samples on substitution.
     current = next((s for s in spellbook.spells if s.id == spell.id), None)
     if current is None:
         return spellbook
     sample_paths = voice_sample_abs_paths(spellbook, current)
-    features: list[FloatArray] = []
+    features: list[VoiceFeature] = []
     for path in sample_paths:
         if not path.exists():
             LOGGER.warning("Sample missing on disk: %s", path)
@@ -248,9 +232,10 @@ def recompute_spell_voice_stats(
 def recompute_all(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    backend: VoiceTemplateBackend | None = None,
 ) -> Spellbook:
-    feature_cache: dict[Path, FloatArray] = {}
+    backend = backend or default_voice_backend()
+    feature_cache: dict[Path, VoiceFeature] = {}
     for spell in list(spellbook.spells):
         if not spell.has_voice or not spell.voice_samples:
             continue
@@ -263,15 +248,16 @@ def recompute_all(
 def compute_backend_stats(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
-) -> tuple[BackendStats, dict[Path, FloatArray]]:
-    feature_cache: dict[Path, FloatArray] = {}
+    backend: VoiceTemplateBackend | None = None,
+) -> tuple[BackendStats, dict[Path, VoiceFeature]]:
+    backend = backend or default_voice_backend()
+    feature_cache: dict[Path, VoiceFeature] = {}
     intra_class_medians: dict[str, float | None] = {}
     extraction_seconds = 0.0
     for spell in spellbook.spells:
         if not spell.has_voice or not spell.voice_samples:
             continue
-        features: list[FloatArray] = []
+        features: list[VoiceFeature] = []
         for path in voice_sample_abs_paths(spellbook, spell):
             if not path.exists():
                 LOGGER.warning("Sample missing on disk: %s", path)
@@ -288,9 +274,10 @@ def compute_backend_stats(
 def leave_one_out_eval(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
-    backend: VoiceTemplateBackend = MFCC_DTW_BACKEND,
+    backend: VoiceTemplateBackend | None = None,
 ) -> list[LooResult]:
-    feature_cache: dict[Path, FloatArray] = {}
+    backend = backend or default_voice_backend()
+    feature_cache: dict[Path, VoiceFeature] = {}
     paths_by_spell: dict[str, list[Path]] = {}
     for spell in spellbook.spells:
         paths = voice_sample_abs_paths(spellbook, spell)
@@ -352,12 +339,12 @@ def leave_one_out_eval(
 
 
 def _rank_with_holdout(
-    query: FloatArray,
+    query: VoiceFeature,
     spellbook: Spellbook,
     holdout_spell_id: str,
     holdout_path: Path,
     config: VoiceRecognitionConfig,
-    feature_cache: dict[Path, FloatArray],
+    feature_cache: dict[Path, VoiceFeature],
     backend: VoiceTemplateBackend,
 ) -> list[SpellRanking]:
     rankings: list[SpellRanking] = []
@@ -399,10 +386,10 @@ def _rank_with_holdout(
 
 
 def _distances_to_samples(
-    query: FloatArray,
+    query: VoiceFeature,
     sample_paths: list[Path],
     config: VoiceRecognitionConfig,
-    feature_cache: dict[Path, FloatArray] | None,
+    feature_cache: dict[Path, VoiceFeature] | None,
     backend: VoiceTemplateBackend,
 ) -> list[float]:
     distances: list[float] = []
@@ -418,3 +405,9 @@ def _distances_to_samples(
                 feature_cache[path] = template
         distances.append(backend.distance(query, template))
     return distances
+
+
+def default_voice_backend() -> VoiceTemplateBackend:
+    from .faster_whisper_backends import faster_whisper_dtw_backend
+
+    return faster_whisper_dtw_backend()

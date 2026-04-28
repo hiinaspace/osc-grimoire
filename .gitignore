@@ -15,6 +15,7 @@ wheels/
 
 # Local scratch data
 data/
+vendor/models/
 
 # Local agent/editor settings
 .claude/settings.local.json
