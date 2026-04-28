@@ -34,6 +34,7 @@ from .spellbook import (
     load_spellbook,
     next_voice_sample_path,
     save_spellbook,
+    voice_sample_abs_paths,
 )
 from .voice_features import trim_voice_audio
 from .voice_recognizer import (
@@ -202,7 +203,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument(
         "--backend",
         default="faster-whisper-dtw",
-        choices=["faster-whisper-dtw", "faster-whisper-nbest", "all"],
+        choices=[
+            "faster-whisper-dtw",
+            "faster-whisper-nbest",
+            "parakeet-ctc-forced",
+            "all",
+        ],
         help="Recognizer backend to evaluate (default: faster-whisper-dtw).",
     )
     p_diag.add_argument(
@@ -758,6 +764,7 @@ def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -
         _print_calibration_report(reports[0])
     else:
         _print_calibration_comparison(reports)
+    _print_parakeet_false_accept_debug(reports, spellbook, config.voice)
     if args.plot_dir:
         try:
             from .diagnostic_plots import write_diagnostic_plots
@@ -776,7 +783,12 @@ def _cmd_diagnose(args: argparse.Namespace, config: AppConfig, data_dir: Path) -
 def _resolve_diagnose_backends(
     backend_name: str, embedding_model: str | None
 ) -> list[VoiceTemplateBackend]:
-    if backend_name not in {"faster-whisper-dtw", "faster-whisper-nbest", "all"}:
+    if backend_name not in {
+        "faster-whisper-dtw",
+        "faster-whisper-nbest",
+        "parakeet-ctc-forced",
+        "all",
+    }:
         raise RuntimeError(f"Unknown backend {backend_name!r}")
     from .faster_whisper_backends import (
         DEFAULT_FASTER_WHISPER_MODEL,
@@ -789,9 +801,14 @@ def _resolve_diagnose_backends(
         return [faster_whisper_dtw_backend(model)]
     if backend_name == "faster-whisper-nbest":
         return [faster_whisper_nbest_backend(model)]
+    if backend_name == "parakeet-ctc-forced":
+        from .parakeet_ctc_backends import parakeet_ctc_forced_backend
+
+        return [parakeet_ctc_forced_backend()]
     return [
         faster_whisper_dtw_backend(model),
         faster_whisper_nbest_backend(model),
+        _resolve_diagnose_backends("parakeet-ctc-forced", None)[0],
     ]
 
 
@@ -909,6 +926,92 @@ def _print_calibration_comparison(reports: list[CalibrationReport]) -> None:
                 f"{row.negative_accepted}/{row.negative_total} FA"
             )
         print(f"  margin>={margin:>4.2f}: " + " | ".join(parts))
+
+
+def _print_parakeet_false_accept_debug(
+    reports: list[CalibrationReport],
+    spellbook: Spellbook,
+    config: VoiceRecognitionConfig,
+) -> None:
+    report = next(
+        (
+            candidate
+            for candidate in reports
+            if candidate.backend_name.startswith("parakeet-ctc-forced:")
+        ),
+        None,
+    )
+    if report is None:
+        return
+
+    false_accepts = [
+        diagnosis
+        for diagnosis in report.examples
+        if diagnosis.example.kind == "negative" and diagnosis.accepted
+    ]
+    if not false_accepts:
+        return
+
+    from .parakeet_ctc_backends import (
+        CtcFeature,
+        format_ctc_feature_distribution,
+        parakeet_ctc_forced_backend,
+        parakeet_ctc_token_labels,
+    )
+
+    backend = parakeet_ctc_forced_backend()
+    token_labels = parakeet_ctc_token_labels()
+    print()
+    print("Parakeet CTC false-accept token distributions:")
+    for diagnosis in false_accepts[:3]:
+        if diagnosis.best_spell_id is None:
+            continue
+        spell = next(
+            (
+                candidate
+                for candidate in spellbook.spells
+                if candidate.id == diagnosis.best_spell_id
+            ),
+            None,
+        )
+        if spell is None:
+            continue
+        query = backend.extract_path(diagnosis.example.path, config)
+        if not isinstance(query, CtcFeature):
+            continue
+        sample_rankings: list[tuple[float, Path, CtcFeature]] = []
+        for sample_path in voice_sample_abs_paths(spellbook, spell):
+            sample = backend.extract_path(sample_path, config)
+            if isinstance(sample, CtcFeature):
+                sample_rankings.append(
+                    (backend.distance(query, sample), sample_path, sample)
+                )
+        sample_rankings.sort(key=lambda item: item[0])
+        if not sample_rankings:
+            continue
+
+        print(
+            f"  {diagnosis.example.path.name} falsely accepted as {spell.name} "
+            f"(margin={_optional_ratio(diagnosis.margin_ratio)}, "
+            f"intra={_optional_ratio(diagnosis.intra_ratio)})"
+        )
+        for line in format_ctc_feature_distribution(
+            query,
+            token_labels,
+            title=f"  query negative: {diagnosis.example.path}",
+        ):
+            print(line)
+        for distance, sample_path, sample in sample_rankings[:2]:
+            for line in format_ctc_feature_distribution(
+                sample,
+                token_labels,
+                title=f"  closest sample d={distance:.2f}: {sample_path}",
+            ):
+                print(line)
+
+
+def _optional_ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}"
 
 
 def _variant_sweep_repr(row: ThresholdSweepResult) -> str:

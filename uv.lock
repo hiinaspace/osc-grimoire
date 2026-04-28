@@ -762,6 +762,18 @@ wheels = [
 ]
 
 [[package]]
+name = "onnx-asr"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/f6/b154881761a593312f509522f99542acffa2516f7a1df6ddf5660ad4a162/onnx_asr-0.11.0.tar.gz", hash = "sha256:57ad8d9571dc17db95f0daf9ba432b9472383de320c610735850e56b5375a37d", size = 43665, upload-time = "2026-03-23T02:30:57.349Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/04/bdffd682cc38b43144b6528186c80451f219a05e3fd0eb331a548f455b9a/onnx_asr-0.11.0-py3-none-any.whl", hash = "sha256:142d8b3ce7716684992826a269304f5ce9cf1c0fe704b751358e223f45d2a5cf", size = 138349, upload-time = "2026-03-23T02:30:58.566Z" },
+]
+
+[[package]]
 name = "onnxruntime"
 version = "1.25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -827,6 +839,10 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
 ]
+research = [
+    { name = "huggingface-hub" },
+    { name = "onnx-asr" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -852,6 +868,10 @@ dev = [
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "ty", specifier = ">=0.0.1a22" },
+]
+research = [
+    { name = "huggingface-hub", specifier = ">=1.2.0" },
+    { name = "onnx-asr", specifier = ">=0.8.1" },
 ]
 
 [[package]]

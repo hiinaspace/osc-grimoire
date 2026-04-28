@@ -114,6 +114,62 @@ def test_diagnose_with_backend_stats_does_not_mutate_spellbook(tmp_path: Path) -
     assert next(s for s in book.spells if s.id == spell.id).intra_class_median is None
 
 
+def test_diagnose_ignores_spells_not_labeled_in_session(tmp_path: Path) -> None:
+    book = load_spellbook(tmp_path / "data")
+    book, expected = create_spell(book, "Expected")
+    book, extra = create_spell(book, "Extra")
+    for spell in (expected, extra):
+        sample_dir = book.data_dir / "samples" / f"spell_{spell.id}"
+        sample_dir.mkdir(parents=True)
+        path = sample_dir / "voice_001.wav"
+        path.touch()
+        book = add_voice_sample(book, spell, path.relative_to(book.data_dir).as_posix())
+
+    session_dir = tmp_path / "calibration" / "session"
+    positive = session_dir / "positives" / "expected" / "attempt_001.wav"
+    positive.parent.mkdir(parents=True)
+    positive.touch()
+    negative = session_dir / "negatives" / "negative_001.wav"
+    negative.parent.mkdir(parents=True)
+    negative.touch()
+    write_calibration_metadata(
+        session_dir,
+        [
+            CalibrationExample(
+                path=positive,
+                kind="positive",
+                expected_spell_id=expected.id,
+                expected_spell_name=expected.name,
+            ),
+            CalibrationExample(path=negative, kind="negative"),
+        ],
+    )
+
+    backend = VoiceTemplateBackend(
+        name="fake",
+        extract_path=lambda path, _config: np.array(
+            [[100.0 if "negative" in path.name else 0.0]], dtype=np.float32
+        ),
+        extract_array=lambda audio, _config, _sample_rate: audio,
+        distance=lambda a, b: (
+            0.0 if b[0, 0] == 100.0 else float(abs(a[0, 0] - b[0, 0]) + 10.0)
+        ),
+        aggregate=lambda distances: float(np.median(distances)),
+    )
+
+    report = diagnose_calibration_session(
+        session_dir,
+        book,
+        VoiceRecognitionConfig(relative_margin_min=0.0),
+        backend,
+    )
+    negative_report = next(d for d in report.examples if d.example.kind == "negative")
+
+    assert negative_report.best_spell_id == expected.id
+    assert negative_report.best_spell_name == expected.name
+    assert negative_report.best_spell_id != extra.id
+
+
 def test_calibration_metadata_round_trips_variant_fields(tmp_path: Path) -> None:
     session_dir = tmp_path / "calibration" / "session"
     path = session_dir / "positives" / "alpha" / "quiet" / "attempt_001.wav"
@@ -337,3 +393,56 @@ def test_nbest_softmax_weights_sum_to_one() -> None:
 
     assert sum(weights) == pytest.approx(1.0)
     assert weights[0] > weights[1] > weights[2]
+
+
+def test_ctc_greedy_token_ids_collapses_repeats_and_blanks() -> None:
+    from osc_grimoire.parakeet_ctc_backends import ctc_greedy_token_ids
+
+    log_probs = np.full((7, 4), -20.0, dtype=np.float32)
+    for frame, token_id in enumerate((3, 1, 1, 3, 2, 2, 3)):
+        log_probs[frame, token_id] = 0.0
+
+    assert ctc_greedy_token_ids(log_probs, blank_id=3) == (1, 2)
+
+
+def test_ctc_sequence_log_probability_prefers_matching_sequence() -> None:
+    from osc_grimoire.parakeet_ctc_backends import ctc_sequence_log_probability
+
+    probs = np.asarray(
+        [
+            [0.80, 0.10, 0.10],
+            [0.10, 0.80, 0.10],
+            [0.10, 0.10, 0.80],
+            [0.10, 0.80, 0.10],
+            [0.10, 0.10, 0.80],
+        ],
+        dtype=np.float32,
+    )
+    log_probs = np.log(probs)
+
+    matching = ctc_sequence_log_probability(log_probs, (0, 1), blank_id=2)
+    mismatched = ctc_sequence_log_probability(log_probs, (1, 0), blank_id=2)
+
+    assert matching > mismatched
+
+
+def test_ctc_forced_distance_prefers_template_sequence() -> None:
+    from osc_grimoire.parakeet_ctc_backends import CtcFeature, _ctc_forced_distance
+
+    probs = np.asarray(
+        [
+            [0.80, 0.10, 0.10],
+            [0.10, 0.80, 0.10],
+            [0.10, 0.10, 0.80],
+            [0.10, 0.80, 0.10],
+            [0.10, 0.10, 0.80],
+        ],
+        dtype=np.float32,
+    )
+    query = CtcFeature(np.log(probs), token_ids=(0, 1))
+    matching = CtcFeature(np.log(probs), token_ids=(0, 1))
+    mismatched = CtcFeature(np.log(probs), token_ids=(1, 0))
+
+    assert _ctc_forced_distance(query, matching) < _ctc_forced_distance(
+        query, mismatched
+    )

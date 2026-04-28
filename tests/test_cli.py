@@ -65,7 +65,13 @@ def test_resolve_all_faster_whisper_backends_without_loading_model() -> None:
     assert [backend.name for backend in backends] == [
         "faster-whisper-dtw:tiny",
         "faster-whisper-nbest:tiny",
+        "parakeet-ctc-forced:parakeet-ctc-110m-int8",
     ]
+
+
+def test_resolve_parakeet_ctc_backend_name_without_loading_model() -> None:
+    backend = _resolve_diagnose_backends("parakeet-ctc-forced", None)[0]
+    assert backend.name == "parakeet-ctc-forced:parakeet-ctc-110m-int8"
 
 
 def test_standard_calibration_prompt_plan() -> None:

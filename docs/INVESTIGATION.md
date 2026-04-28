@@ -24,25 +24,33 @@ Build a local recognizer that can distinguish a small user-trained spell vocabul
 - OpenWakeWord's shared `speech_embedding` ONNX feature extractor is fast and lightweight, but performed worse than WavLM and Whisper on this vocabulary. It remains useful as a deployment reference, not the leading recognizer.
 - Whisper encoder frame embeddings with DTW performed best. `openai/whisper-tiny` matched or beat larger variants on the recorded sets while staying smaller and faster.
 - A follow-up diagnostic spike adds `faster-whisper-nbest`, which compares CTranslate2 beam hypotheses instead of encoder frames. CTranslate2 exposes multiple decoded sequences with `num_hypotheses`; the spike treats those as a weighted bag of plausible phonetic/text interpretations for each sample.
+- A second follow-up spike adds `parakeet-ctc-forced`, which uses the Parakeet 110M CTC ONNX model's own timing-invariant forward algorithm to score each query posteriorgram against token sequences decoded from training samples. This is a better conceptual fit than DTW over CTC posterior frames.
 
 ## Current Runtime Candidate
 
 `faster-whisper-dtw` with `Systran/faster-whisper-tiny` is the current runtime recognizer. It uses the same Whisper tiny encoder behavior through CTranslate2 without shipping PyTorch.
 
-Observed calibration results:
+Corrected held-out calibration results from `session_20260424_204205`:
 
-- Initial held-out session: `15/15` positive hits at `0/15` false accepts with `relative_margin_min=0.15`.
-- Variant session with clean/quiet/slow/fast delivery: `53/60` positive hits at `0/10` false accepts with `relative_margin_min=0.15`.
-- At the previous `0.20` margin, the variant session dropped to `44/60` positive hits, mostly from fast delivery.
+- `faster-whisper-dtw`: `49/60` positive hits and `0/10` false accepts at margin `0.15`; best zero-false-accept point is `53/60` at margin `0.10`.
+- `faster-whisper-nbest`: `25/60` positive hits and `0/10` false accepts at margin `0.20`; this remains weaker than frame-level Whisper DTW.
+- `parakeet-ctc-forced`: `57/60` positive hits and `0/10` false accepts from margin `0.07` through `0.20`, using Parakeet 110M INT8 CTC posteriorgrams and CTC forced-sequence scoring.
 
-The current candidate threshold for Whisper DTW is therefore `relative_margin_min=0.15`.
+The current release candidate remains `faster-whisper-dtw` because the local release flow is already built around CTranslate2. However, `parakeet-ctc-forced` is now the strongest recognition candidate on the available held-out session and is worth considering for the runtime path.
+
+Measured local tradeoff on the corrected benchmark:
+
+- Model files: bundled `faster-whisper-tiny` is about `74.6 MiB`; Parakeet 110M INT8 cache is about `125.6 MiB`, a `+51.0 MiB` model delta.
+- Peak RSS during `diagnose --backend all`: `faster-whisper-dtw` about `147 MiB`; `parakeet-ctc-forced` about `368 MiB`, a `+221 MiB` process-memory delta when both are loaded in one process.
+- Feature extraction: `faster-whisper-dtw` about `11.4s`; `parakeet-ctc-forced` about `4.0s` on the same session.
 
 The full research backend spike, including MFCC, WavLM, Wav2Vec2, OpenWakeWord, Transformers Whisper, and faster-whisper comparison code, is preserved in git at commit `87e579f` (`Add faster-whisper diagnostic backend`).
 
 ## Open Questions
 
 - `faster-whisper-nbest` tests whether user-trained spells can be represented by overlapping beam hypotheses such as `alohomora`, `aloha mora`, or similar token sequences. This may help where Whisper already knows a stable near-text interpretation, but it may fail for common English phrases or for nonsense words that decode inconsistently.
-- A later CTC/posteriorgram spike is still plausible. Parakeet/FastConformer-style models may expose frame-level token distributions closer to the speech recognizer's timing-invariant layer, but they should remain optional research dependencies until they beat the current tiny CTranslate2 runtime path.
+- `parakeet-ctc-forced` originally appeared false-positive-bound because diagnostics evaluated old calibration-session negatives against new live spellbook entries such as `Sneed`. Diagnostics now filter each session to spells that appear in that session's positive labels. After that correction, Parakeet has the best current threshold curve.
+- Parakeet/FastConformer research dependencies should remain optional until packaging is revisited. The CTC forced scorer is useful evidence that ASR-native scoring can outperform generic embedding distance for this few-shot spell-recognition task.
 
 ## UX Implications
 

@@ -158,6 +158,7 @@ def diagnose_calibration_session(
 ) -> CalibrationReport:
     backend = backend or default_voice_backend()
     examples = load_calibration_examples(session_dir)
+    spellbook = _spellbook_for_calibration_examples(spellbook, examples)
     peak_rss_mb = _current_rss_mb()
     backend_stats, feature_cache = compute_backend_stats(spellbook, config, backend)
     peak_rss_mb = _max_optional(peak_rss_mb, _current_rss_mb())
@@ -192,6 +193,24 @@ def diagnose_calibration_session(
         extraction_seconds=backend_stats.extraction_seconds
         + sum(d.extraction_seconds for d in diagnoses),
         peak_rss_mb=peak_rss_mb,
+    )
+
+
+def _spellbook_for_calibration_examples(
+    spellbook: Spellbook, examples: list[CalibrationExample]
+) -> Spellbook:
+    expected_spell_ids = {
+        example.expected_spell_id
+        for example in examples
+        if example.kind == "positive" and example.expected_spell_id is not None
+    }
+    if not expected_spell_ids:
+        return spellbook
+    return Spellbook(
+        data_dir=spellbook.data_dir,
+        spells=tuple(
+            spell for spell in spellbook.spells if spell.id in expected_spell_ids
+        ),
     )
 
 
