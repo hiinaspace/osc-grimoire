@@ -53,6 +53,10 @@ class OpenVrActionHandles:
     right_grip: int
     right_pose: int
     right_source: int
+    left_trigger: int
+    left_grip: int
+    left_pose: int
+    left_source: int
 
 
 @dataclass(frozen=True)
@@ -296,6 +300,7 @@ class OpenVrOverlayRunner:
                 self.renderer.poll_events()
                 self._poll_overlay_events()
                 self.app.controller.tick_outputs()
+                self.config = self.app.controller.config.openvr
                 self._sync_overlay_visibility()
                 if self.app.controller.ui_enabled:
                     self._update_overlay_transform()
@@ -494,7 +499,9 @@ class OpenVrOverlayRunner:
         assert self.overlay_handle is not None
         device_index = self._overlay_device_index()
         if device_index == self.openvr.k_unTrackedDeviceIndexInvalid:
-            self.app.controller.status = "Waiting for left controller..."
+            self.app.controller.status = (
+                f"Waiting for {self.config.overlay_hand} controller..."
+            )
             return
         transform = overlay_transform_matrix(self.config)
         self.vr_overlay.setOverlayTransformTrackedDeviceRelative(
@@ -651,16 +658,21 @@ class OpenVrOverlayRunner:
             right_grip=self.vr_input.getActionHandle("/actions/main/in/right_grip"),
             right_pose=self.vr_input.getActionHandle("/actions/main/in/right_pose"),
             right_source=self.vr_input.getInputSourceHandle("/user/hand/right"),
+            left_trigger=self.vr_input.getActionHandle("/actions/main/in/left_trigger"),
+            left_grip=self.vr_input.getActionHandle("/actions/main/in/left_grip"),
+            left_pose=self.vr_input.getActionHandle("/actions/main/in/left_pose"),
+            left_source=self.vr_input.getInputSourceHandle("/user/hand/left"),
         )
 
     def _input_state(self) -> OpenVrInputState:
         self._update_action_state()
-        digital_data = self._digital_action_data("right_trigger")
+        hand = self.config.pointer_hand
+        digital_data = self._digital_action_data(f"{hand}_trigger")
         return OpenVrInputState(
             trigger_down=bool(digital_data.bActive and digital_data.bState),
             trigger_changed=bool(digital_data.bActive and digital_data.bChanged),
-            grip_down=self._digital_action_state("right_grip"),
-            pose=self._right_pose_action(),
+            grip_down=self._digital_action_state(f"{hand}_grip"),
+            pose=self._pose_action(hand),
         )
 
     def _update_action_state(self) -> None:
@@ -689,22 +701,29 @@ class OpenVrOverlayRunner:
         assert self.vr_input is not None
         assert self.action_handles is not None
         handle = getattr(self.action_handles, name)
+        source = self._action_source_handle()
         return self.vr_input.getDigitalActionData(
-            handle, self.action_handles.right_source
+            handle,
+            source,
         )
 
-    def _right_pose_action(self) -> Any | None:
+    def _pose_action(self, hand: str) -> Any | None:
         assert self.openvr is not None
         assert self.vr_input is not None
         assert self.action_handles is not None
+        pose_handle = getattr(self.action_handles, f"{hand}_pose")
         pose_data = self.vr_input.getPoseActionDataForNextFrame(
-            self.action_handles.right_pose,
+            pose_handle,
             self.openvr.TrackingUniverseStanding,
-            self.action_handles.right_source,
+            self._action_source_handle(),
         )
         if pose_data.bActive and pose_data.pose.bPoseIsValid:
             return pose_data.pose
         return self._fallback_pointer_pose()
+
+    def _action_source_handle(self) -> int:
+        assert self.action_handles is not None
+        return getattr(self.action_handles, f"{self.config.pointer_hand}_source")
 
     def _show_gesture_trail(self) -> None:
         assert self.vr_overlay is not None

@@ -113,6 +113,17 @@ def test_application_manifest_registers_action_manifest() -> None:
     assert "actions.json" in payload
 
 
+def test_action_manifest_includes_left_and_right_casting_actions() -> None:
+    from osc_grimoire.openvr_overlay import action_manifest_path
+
+    payload = action_manifest_path().read_text(encoding="utf-8")
+
+    assert "/actions/main/in/right_trigger" in payload
+    assert "/actions/main/in/left_trigger" in payload
+    assert "/actions/main/in/right_pose" in payload
+    assert "/actions/main/in/left_pose" in payload
+
+
 def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = OpenVrOverlayRunner(
         cast(DesktopVoiceUi, _FakeApp()), OpenVrOverlayConfig()

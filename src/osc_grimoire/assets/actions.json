@@ -18,6 +18,18 @@
     {
       "name": "/actions/main/in/right_pose",
       "type": "pose"
+    },
+    {
+      "name": "/actions/main/in/left_trigger",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/left_grip",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/main/in/left_pose",
+      "type": "pose"
     }
   ],
   "default_bindings": [
@@ -34,9 +46,12 @@
     {
       "language_tag": "en_US",
       "/actions/main": "OSC Grimoire",
-      "/actions/main/in/right_trigger": "Point / Speak",
-      "/actions/main/in/right_grip": "Gesture",
-      "/actions/main/in/right_pose": "Right Controller Pose"
+      "/actions/main/in/right_trigger": "Point / Speak (Right)",
+      "/actions/main/in/right_grip": "Gesture (Right)",
+      "/actions/main/in/right_pose": "Right Controller Pose",
+      "/actions/main/in/left_trigger": "Point / Speak (Left)",
+      "/actions/main/in/left_grip": "Gesture (Left)",
+      "/actions/main/in/left_pose": "Left Controller Pose"
     }
   ]
 }

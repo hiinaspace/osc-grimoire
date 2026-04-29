@@ -157,6 +157,48 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
     assert not controller.gesture_enabled
 
 
+def test_controller_casting_hand_moves_book_to_opposite_hand(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    controller.set_casting_hand("left")
+
+    assert controller.config.openvr.pointer_hand == "left"
+    assert controller.config.openvr.overlay_hand == "right"
+
+
+def test_controller_voice_strictness_updates_voice_thresholds(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+
+    controller.set_voice_strictness(0.0)
+    assert controller.voice_config.relative_margin_min == 0.0
+
+    controller.set_voice_strictness(0.30)
+    assert controller.voice_config.relative_margin_min == pytest.approx(0.20)
+
+    controller.set_voice_strictness(1.0)
+    assert controller.voice_config.relative_margin_min == pytest.approx(0.45)
+
+
+def test_controller_gesture_strictness_updates_gesture_thresholds(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+
+    controller.set_gesture_strictness(0.0)
+    assert controller.config.gesture.score_min == 0.0
+    assert controller.config.gesture.margin_min == 0.0
+
+    controller.set_gesture_strictness(0.30)
+    assert controller.config.gesture.score_min == pytest.approx(0.20)
+    assert controller.config.gesture.margin_min == pytest.approx(0.03)
+
+    controller.set_gesture_strictness(1.0)
+    assert controller.config.gesture.score_min == pytest.approx(0.70)
+    assert controller.config.gesture.margin_min == pytest.approx(0.25)
+
+
 def test_controller_preloads_backend(tmp_path: Path) -> None:
     backend = _CountingBackend()
     controller = VoiceTrainingController(

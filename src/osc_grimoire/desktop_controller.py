@@ -56,6 +56,17 @@ from .waveform import load_waveform_preview
 
 DEFAULT_SAMPLE_TARGET = 10
 PARAKEET_CTC_RELATIVE_MARGIN_MIN = 0.20
+DEFAULT_RECOGNITION_STRICTNESS = 0.30
+LENIENT_VOICE_MARGIN_MIN = 0.0
+STRICT_VOICE_MARGIN_MIN = 0.45
+LENIENT_VOICE_INTRA_RATIO_MAX = 999.0
+STRICT_VOICE_INTRA_RATIO_MAX = 1.15
+LENIENT_GESTURE_SCORE_MIN = 0.0
+STRICT_GESTURE_SCORE_MIN = 0.70
+DEFAULT_GESTURE_SCORE_MIN = 0.20
+LENIENT_GESTURE_MARGIN_MIN = 0.0
+DEFAULT_GESTURE_MARGIN_MIN = 0.03
+STRICT_GESTURE_MARGIN_MIN = 0.25
 
 
 class OutputSink(Protocol):
@@ -133,6 +144,8 @@ class VoiceTrainingController:
         self.audio_player = audio_player or SoundDeviceAudioPlayer()
         self.local_gesture_enabled = True
         self.local_voice_enabled = True
+        self.voice_strictness = DEFAULT_RECOGNITION_STRICTNESS
+        self.gesture_strictness = DEFAULT_RECOGNITION_STRICTNESS
         self.spellbook = load_spellbook(data_dir)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
@@ -186,6 +199,63 @@ class VoiceTrainingController:
     def set_voice_enabled(self, enabled: bool) -> None:
         self.local_voice_enabled = enabled
         self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
+
+    def set_casting_hand(self, hand: str) -> None:
+        if hand not in {"left", "right"}:
+            raise ValueError("Casting hand must be 'left' or 'right'")
+        book_hand = "left" if hand == "right" else "right"
+        self.config = replace(
+            self.config,
+            openvr=replace(
+                self.config.openvr,
+                pointer_hand=hand,
+                overlay_hand=book_hand,
+            ),
+        )
+        self.status = f"Casting hand set to {hand}."
+
+    def set_voice_strictness(self, value: float) -> None:
+        value = min(max(float(value), 0.0), 1.0)
+        self.voice_strictness = value
+        self.voice_config = replace(
+            self.voice_config,
+            relative_margin_min=_strictness_value(
+                value,
+                LENIENT_VOICE_MARGIN_MIN,
+                PARAKEET_CTC_RELATIVE_MARGIN_MIN,
+                STRICT_VOICE_MARGIN_MIN,
+            ),
+            intra_class_ratio_max=_strictness_value(
+                value,
+                LENIENT_VOICE_INTRA_RATIO_MAX,
+                self.config.voice.intra_class_ratio_max,
+                STRICT_VOICE_INTRA_RATIO_MAX,
+            ),
+        )
+        self.status = "Voice tuning updated."
+
+    def set_gesture_strictness(self, value: float) -> None:
+        value = min(max(float(value), 0.0), 1.0)
+        self.gesture_strictness = value
+        self.config = replace(
+            self.config,
+            gesture=replace(
+                self.config.gesture,
+                score_min=_strictness_value(
+                    value,
+                    LENIENT_GESTURE_SCORE_MIN,
+                    DEFAULT_GESTURE_SCORE_MIN,
+                    STRICT_GESTURE_SCORE_MIN,
+                ),
+                margin_min=_strictness_value(
+                    value,
+                    LENIENT_GESTURE_MARGIN_MIN,
+                    DEFAULT_GESTURE_MARGIN_MIN,
+                    STRICT_GESTURE_MARGIN_MIN,
+                ),
+            ),
+        )
+        self.status = "Gesture tuning updated."
 
     def set_voice_recording(self, recording: bool) -> None:
         if self.output is not None:
@@ -599,6 +669,18 @@ def _voice_decision_summary(
     ):
         return f"too close between {ranking[0].name} and {ranking[1].name}"
     return decision.reason
+
+
+def _strictness_value(
+    value: float, lenient: float, default: float, strict: float
+) -> float:
+    if value <= DEFAULT_RECOGNITION_STRICTNESS:
+        ratio = value / DEFAULT_RECOGNITION_STRICTNESS
+        return lenient + (default - lenient) * ratio
+    ratio = (value - DEFAULT_RECOGNITION_STRICTNESS) / (
+        1.0 - DEFAULT_RECOGNITION_STRICTNESS
+    )
+    return default + (strict - default) * ratio
 
 
 def format_gesture_debug(

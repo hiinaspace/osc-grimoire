@@ -96,7 +96,7 @@ class DesktopVoiceUi:
         if self.page == PAGE_MAIN:
             self._draw_main_page()
         elif self.page == PAGE_DIAGNOSTICS:
-            self._draw_diagnostics_page()
+            self._draw_settings_page()
         else:
             self._draw_spell_page()
         imgui.separator()
@@ -138,7 +138,7 @@ class DesktopVoiceUi:
         imgui.same_line()
         imgui.text(f"Page: {self._page_title()}")
         imgui.same_line()
-        if imgui.button("Diagnostics"):
+        if imgui.button("Settings"):
             self.page = PAGE_DIAGNOSTICS
         imgui.table_next_column()
         self._draw_centered_activity_status()
@@ -610,13 +610,83 @@ class DesktopVoiceUi:
         draw_list.add_circle_filled(center, 7.0, outer, 16)
         draw_list.add_circle_filled(center, 4.0, inner, 16)
 
-    def _draw_diagnostics_page(self) -> None:
+    def _draw_settings_page(self) -> None:
         from imgui_bundle import imgui
 
+        imgui.text("Settings")
+        imgui.separator()
+        imgui.text("Casting hand")
+        imgui.text_disabled("The spellbook appears on the opposite hand.")
+        current_hand = self.controller.config.openvr.pointer_hand
+        if current_hand == "right":
+            imgui.begin_disabled()
+        if imgui.button("Right"):
+            self.controller.set_casting_hand("right")
+        if current_hand == "right":
+            imgui.end_disabled()
+        imgui.same_line()
+        if current_hand == "left":
+            imgui.begin_disabled()
+        if imgui.button("Left"):
+            self.controller.set_casting_hand("left")
+        if current_hand == "left":
+            imgui.end_disabled()
+
+        imgui.separator()
+        imgui.text("Recognition tuning")
+        imgui.text_disabled(
+            "Move left to accept more attempts; move right to reject uncertain matches."
+        )
+        self._draw_strictness_slider(
+            "Voice",
+            self.controller.voice_strictness,
+            self.controller.set_voice_strictness,
+        )
+        self._draw_strictness_slider(
+            "Gesture",
+            self.controller.gesture_strictness,
+            self.controller.set_gesture_strictness,
+        )
+
+        imgui.separator()
+        if imgui.collapsing_header("Diagnostics"):
+            self._draw_diagnostics_details()
+
+    def _draw_strictness_slider(
+        self, label: str, value: float, setter: Callable[[float], None]
+    ) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text(label)
+        imgui.text("Lenient")
+        imgui.same_line()
+        slider_width = max(220.0, imgui.get_content_region_avail().x - 58.0)
+        imgui.set_next_item_width(slider_width)
+        changed, value = imgui.slider_float(
+            f"##{label.lower()}_strictness",
+            value,
+            0.0,
+            1.0,
+            "",
+        )
+        if changed:
+            setter(value)
+        imgui.same_line()
+        imgui.text("Strict")
+
+    def _draw_diagnostics_details(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text("Diagnostics")
         imgui.text(f"Backend: {self.controller.backend.name}")
         imgui.text(
             "relative_margin_min: "
             f"{self.controller.voice_config.relative_margin_min:.2f}"
+        )
+        imgui.text(
+            "gesture score/margin: "
+            f"{self.controller.config.gesture.score_min:.2f}/"
+            f"{self.controller.config.gesture.margin_min:.2f}"
         )
         if self.controller.output_status is not None:
             imgui.text(self.controller.output_status)
@@ -1033,7 +1103,7 @@ class DesktopVoiceUi:
         if self.page == PAGE_MAIN:
             return "Main / Recognize"
         if self.page == PAGE_DIAGNOSTICS:
-            return "Diagnostics"
+            return "Settings"
         spell = self._selected_spell()
         if spell is not None:
             return spell.name
