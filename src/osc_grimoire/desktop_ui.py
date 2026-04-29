@@ -53,6 +53,7 @@ class DesktopVoiceUi:
         self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
         self.keyboard_request_handler: Callable[[str | None, str], bool] | None = None
         self.keyboard_close_handler: Callable[[], None] | None = None
+        self.bindings_request_handler: Callable[[], bool] | None = None
         self.keyboard_edit_spell_id: str | None = None
         self.keyboard_editing = False
         self.keyboard_focus_pending = False
@@ -633,6 +634,18 @@ class DesktopVoiceUi:
             imgui.end_disabled()
 
         imgui.separator()
+        imgui.text("Controller bindings")
+        imgui.text_disabled("Default bindings:")
+        imgui.bullet_text("Voice: hold trigger on the casting hand.")
+        imgui.bullet_text("Gesture: hold grip on the casting hand.")
+        imgui.bullet_text("Show/hide spellbook: hold both B buttons.")
+        imgui.text_wrapped(
+            "Use SteamVR bindings to change buttons or inspect the active controller profile."
+        )
+        if imgui.button("Change Bindings"):
+            self._request_binding_settings()
+
+        imgui.separator()
         imgui.text("Recognition tuning")
         imgui.text_disabled(
             "Move left to accept more attempts; move right to reject uncertain matches."
@@ -673,6 +686,15 @@ class DesktopVoiceUi:
             setter(value)
         imgui.same_line()
         imgui.text("Strict")
+
+    def _request_binding_settings(self) -> None:
+        if self.bindings_request_handler is None:
+            self.controller.status = "SteamVR binding UI is unavailable."
+            return
+        if self.bindings_request_handler():
+            self.controller.status = "Opening SteamVR bindings..."
+        else:
+            self.controller.status = "Could not open SteamVR bindings."
 
     def _draw_diagnostics_details(self) -> None:
         from imgui_bundle import imgui

@@ -49,6 +49,7 @@ MouseEvent = tuple[str, tuple[float, float]] | tuple[str, bool]
 @dataclass(frozen=True)
 class OpenVrActionHandles:
     action_set: int
+    ui_toggle: int
     right_trigger: int
     right_grip: int
     right_pose: int
@@ -282,6 +283,7 @@ class OpenVrOverlayRunner:
         self._shutdown_openvr = False
         self.app.keyboard_request_handler = self.request_spell_name_keyboard
         self.app.keyboard_close_handler = self._hide_keyboard
+        self.app.bindings_request_handler = self.open_binding_ui
 
     def run(self) -> None:
         self._init_openvr()
@@ -415,6 +417,21 @@ class OpenVrOverlayRunner:
         self.keyboard_request = SteamVrKeyboardRequest(target_spell_id, user_value)
         return True
 
+    def open_binding_ui(self) -> bool:
+        if self.vr_input is None or self.action_handles is None:
+            return False
+        try:
+            self.vr_input.openBindingUI(
+                APP_KEY,
+                self.action_handles.action_set,
+                self._action_source_handle(),
+                False,
+            )
+            return True
+        except Exception:
+            LOGGER.exception("Could not open SteamVR binding UI")
+            return False
+
     def _set_keyboard_avoid_rect(self) -> None:
         assert self.openvr is not None
         assert self.vr_overlay is not None
@@ -527,6 +544,8 @@ class OpenVrOverlayRunner:
         assert self.vr_overlay is not None
         assert self.overlay_handle is not None
         input_state = self._input_state()
+        if self._digital_action_pressed("ui_toggle"):
+            self.app.controller.toggle_ui_enabled()
         trigger_pressed = input_state.trigger_down and not self.trigger_down
         trigger_released = not input_state.trigger_down and self.trigger_down
         if not self.app.controller.voice_enabled and self.voice_trigger_down:
@@ -652,6 +671,7 @@ class OpenVrOverlayRunner:
         self.vr_input.setActionManifestPath(str(manifest_path))
         self.action_handles = OpenVrActionHandles(
             action_set=self.vr_input.getActionSetHandle("/actions/main"),
+            ui_toggle=self.vr_input.getActionHandle("/actions/main/in/ui_toggle"),
             right_trigger=self.vr_input.getActionHandle(
                 "/actions/main/in/right_trigger"
             ),
@@ -696,12 +716,22 @@ class OpenVrOverlayRunner:
         data = self._digital_action_data(name)
         return bool(data.bActive and data.bChanged)
 
+    def _digital_action_pressed(self, name: str) -> bool:
+        if self.vr_input is None or self.action_handles is None:
+            return False
+        data = self._digital_action_data(name)
+        return bool(data.bActive and data.bState and data.bChanged)
+
     def _digital_action_data(self, name: str) -> Any:
         assert self.openvr is not None
         assert self.vr_input is not None
         assert self.action_handles is not None
         handle = getattr(self.action_handles, name)
-        source = self._action_source_handle()
+        source = (
+            self.openvr.k_ulInvalidInputValueHandle
+            if name == "ui_toggle"
+            else self._action_source_handle()
+        )
         return self.vr_input.getDigitalActionData(
             handle,
             source,

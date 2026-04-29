@@ -142,6 +142,7 @@ class VoiceTrainingController:
         self.output = output
         self.osc_input = osc_input
         self.audio_player = audio_player or SoundDeviceAudioPlayer()
+        self.local_ui_enabled = True
         self.local_gesture_enabled = True
         self.local_voice_enabled = True
         self.voice_strictness = DEFAULT_RECOGNITION_STRICTNESS
@@ -176,7 +177,8 @@ class VoiceTrainingController:
 
     @property
     def ui_enabled(self) -> bool:
-        return self.osc_input.ui_enabled if self.osc_input is not None else True
+        osc_enabled = self.osc_input.ui_enabled if self.osc_input is not None else True
+        return self.local_ui_enabled and osc_enabled
 
     @property
     def gesture_enabled(self) -> bool:
@@ -199,6 +201,10 @@ class VoiceTrainingController:
     def set_voice_enabled(self, enabled: bool) -> None:
         self.local_voice_enabled = enabled
         self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
+
+    def toggle_ui_enabled(self) -> None:
+        self.local_ui_enabled = not self.local_ui_enabled
+        self.status = f"UI {'shown' if self.local_ui_enabled else 'hidden'}."
 
     def set_casting_hand(self, hand: str) -> None:
         if hand not in {"left", "right"}:

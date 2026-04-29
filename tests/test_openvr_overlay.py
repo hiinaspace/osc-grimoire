@@ -9,9 +9,11 @@ from osc_grimoire.config import GestureRecognitionConfig, OpenVrOverlayConfig
 from osc_grimoire.desktop_ui import DesktopVoiceUi
 from osc_grimoire.openvr_overlay import (
     APP_KEY,
+    OpenVrActionHandles,
     OpenVrInputState,
     OpenVrOverlayRunner,
     OverlayMouseState,
+    action_manifest_path,
     ensure_application_manifest,
     is_button_pressed,
     is_trigger_pressed,
@@ -122,6 +124,26 @@ def test_action_manifest_includes_left_and_right_casting_actions() -> None:
     assert "/actions/main/in/left_trigger" in payload
     assert "/actions/main/in/right_pose" in payload
     assert "/actions/main/in/left_pose" in payload
+    assert "/actions/main/in/ui_toggle" in payload
+
+
+def test_knuckles_binding_chords_b_buttons_for_ui_toggle() -> None:
+    import json
+
+    payload = json.loads(
+        (action_manifest_path().parent / "bindings_knuckles.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    chords = payload["bindings"]["/actions/main"]["chords"]
+
+    assert {
+        "inputs": [
+            ["/user/hand/left/input/b", "single"],
+            ["/user/hand/right/input/b", "single"],
+        ],
+        "output": "/actions/main/in/ui_toggle",
+    } in chords
 
 
 def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,12 +425,61 @@ def test_openvr_overlay_event_poll_unwraps_pyopenvr_tuple() -> None:
     assert not runner._poll_next_overlay_event(event)
 
 
+def test_runner_opens_steamvr_binding_ui() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    vr_input = _FakeVrInput()
+    runner.vr_input = vr_input
+    runner.action_handles = OpenVrActionHandles(
+        action_set=10,
+        ui_toggle=9,
+        right_trigger=11,
+        right_grip=12,
+        right_pose=13,
+        right_source=14,
+        left_trigger=21,
+        left_grip=22,
+        left_pose=23,
+        left_source=24,
+    )
+
+    assert runner.open_binding_ui()
+
+    assert vr_input.binding_calls == [(APP_KEY, 10, 14, False)]
+
+
+def test_runner_ui_toggle_action_flips_controller_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    monkeypatch.setattr(
+        runner, "_input_state", lambda: OpenVrInputState(False, False, False, poses[1])
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(runner, "_apply_mouse_events", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        runner, "_digital_action_pressed", lambda name: name == "ui_toggle"
+    )
+
+    runner._inject_controller_input()
+
+    assert app.controller.ui_toggle_count == 1
+
+
 class _FakeController:
     status = ""
     config = type("Config", (), {"gesture": GestureRecognitionConfig()})()
 
     def __init__(self) -> None:
         self.gesture_count = 0
+        self.ui_toggle_count = 0
         self.gesture_drawing: list[bool] = []
         self.voice_recording: list[bool] = []
         self.ui_enabled = True
@@ -423,6 +494,9 @@ class _FakeController:
 
     def set_voice_recording(self, recording: bool) -> None:
         self.voice_recording.append(recording)
+
+    def toggle_ui_enabled(self) -> None:
+        self.ui_toggle_count += 1
 
 
 class _FakeApp:
@@ -533,6 +607,16 @@ class _FakeOverlay:
 
     def hideKeyboard(self) -> None:
         pass
+
+
+class _FakeVrInput:
+    def __init__(self) -> None:
+        self.binding_calls: list[tuple[str, int, int, bool]] = []
+
+    def openBindingUI(
+        self, app_key: str, action_set: int, device_handle: int, show_on_desktop: bool
+    ) -> None:
+        self.binding_calls.append((app_key, action_set, device_handle, show_on_desktop))
 
 
 class _FakeTupleOverlay(_FakeOverlay):

@@ -8,6 +8,10 @@
   ],
   "actions": [
     {
+      "name": "/actions/main/in/ui_toggle",
+      "type": "boolean"
+    },
+    {
       "name": "/actions/main/in/right_trigger",
       "type": "boolean"
     },
@@ -51,7 +55,8 @@
       "/actions/main/in/right_pose": "Right Controller Pose",
       "/actions/main/in/left_trigger": "Point / Speak (Left)",
       "/actions/main/in/left_grip": "Gesture (Left)",
-      "/actions/main/in/left_pose": "Left Controller Pose"
+      "/actions/main/in/left_pose": "Left Controller Pose",
+      "/actions/main/in/ui_toggle": "Show / Hide Spellbook"
     }
   ]
 }
