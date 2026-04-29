@@ -81,7 +81,7 @@ class DesktopVoiceUi:
         self.controller.tick_outputs()
         self._log_status_changes()
         self._ensure_implot_context()
-        window_flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_collapse
+        window_flags = imgui.WindowFlags_.no_collapse
         if self.overlay_mode:
             imgui.set_next_window_pos(imgui.ImVec2(0, 0))
             imgui.set_next_window_size(
@@ -93,7 +93,15 @@ class DesktopVoiceUi:
                 | imgui.WindowFlags_.no_saved_settings
             )
         else:
-            imgui.set_next_window_size(imgui.ImVec2(980, 720))
+            display_size = imgui.get_io().display_size
+            imgui.set_next_window_pos(imgui.ImVec2(0, 0))
+            imgui.set_next_window_size(display_size)
+            window_flags |= (
+                imgui.WindowFlags_.no_decoration
+                | imgui.WindowFlags_.no_move
+                | imgui.WindowFlags_.no_resize
+                | imgui.WindowFlags_.no_saved_settings
+            )
         _expanded, _open = imgui.begin(
             "OSC Grimoire",
             None,
@@ -121,15 +129,12 @@ class DesktopVoiceUi:
         table_flags = (
             imgui.TableFlags_.sizing_stretch_prop | imgui.TableFlags_.no_saved_settings
         )
-        if not imgui.begin_table("##top_bar", 3, table_flags):
+        if not imgui.begin_table("##top_bar", 4, table_flags):
             return
-        imgui.table_setup_column(
-            "Navigation", imgui.TableColumnFlags_.width_stretch, 0.38
-        )
-        imgui.table_setup_column(
-            "Activity", imgui.TableColumnFlags_.width_stretch, 0.24
-        )
-        imgui.table_setup_column("Status", imgui.TableColumnFlags_.width_stretch, 0.38)
+        imgui.table_setup_column("Navigation", imgui.TableColumnFlags_.width_fixed, 320)
+        imgui.table_setup_column("Page", imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column("Activity", imgui.TableColumnFlags_.width_fixed, 210)
+        imgui.table_setup_column("Status", imgui.TableColumnFlags_.width_fixed, 320)
         imgui.table_next_row()
         imgui.table_next_column()
         if imgui.button("Main"):
@@ -138,16 +143,16 @@ class DesktopVoiceUi:
                 self.controller.cancel_draft()
                 self.suppress_add_spell_until_mouse_up = True
         imgui.same_line()
+        if imgui.button("Settings"):
+            self.page = PAGE_DIAGNOSTICS
+        imgui.same_line()
         if imgui.button("Prev"):
             self._go_prev_page()
         imgui.same_line()
         if imgui.button("Next"):
             self._go_next_page()
-        imgui.same_line()
+        imgui.table_next_column()
         imgui.text(f"Page: {self._page_title()}")
-        imgui.same_line()
-        if imgui.button("Settings"):
-            self.page = PAGE_DIAGNOSTICS
         imgui.table_next_column()
         self._draw_centered_activity_status()
         imgui.table_next_column()
@@ -164,15 +169,24 @@ class DesktopVoiceUi:
         )
         if not imgui.begin_table("##main_page_folio", 2, table_flags):
             return
+        recognition_width = 0.64 if self.overlay_mode else 0.72
+        visualization_width = 1.0 - recognition_width
         imgui.table_setup_column(
-            "Recognition", imgui.TableColumnFlags_.width_stretch, 0.64
+            "Recognition", imgui.TableColumnFlags_.width_stretch, recognition_width
         )
         imgui.table_setup_column(
-            "Visualization", imgui.TableColumnFlags_.width_stretch, 0.36
+            "Visualization", imgui.TableColumnFlags_.width_stretch, visualization_width
         )
         imgui.table_next_row()
         imgui.table_next_column()
         imgui.text("Spells")
+        if not self.overlay_mode:
+            self._hold_button(
+                "Hold to Recognize",
+                "recognize",
+                allow_space=False,
+                size=(230, 36),
+            )
         if not self.controller.spellbook.spells:
             self._draw_main_empty_state()
         self._draw_spell_summary_table()
@@ -206,7 +220,8 @@ class DesktopVoiceUi:
             return
         imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_fixed, 140)
         imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch)
-        imgui.table_setup_column("OSC", imgui.TableColumnFlags_.width_fixed, 245)
+        osc_width = 245 if self.overlay_mode else 300
+        imgui.table_setup_column("OSC", imgui.TableColumnFlags_.width_fixed, osc_width)
         for spell in self.controller.spellbook.spells:
             imgui.table_next_row()
             imgui.table_next_column()
@@ -228,8 +243,12 @@ class DesktopVoiceUi:
                 self._open_spell_page(spell)
             self._draw_spell_row_match(spell)
             imgui.table_next_column()
+            osc_label = f"osc: {self.controller.spell_osc_parameter_name(spell)}"
             imgui.text_disabled(
-                f"osc: {_shorten_ui_text(self.controller.spell_osc_parameter_name(spell), 36)}"
+                _left_elide_text_to_width(
+                    osc_label,
+                    imgui.get_content_region_avail().x,
+                )
             )
             imgui.pop_id()
         imgui.table_next_row()
@@ -562,11 +581,19 @@ class DesktopVoiceUi:
         imgui.text("Samples")
         imgui.same_line()
         self._hold_button(
-            "Record Sample" if self.overlay_mode else "Record Sample (Space)",
+            "Record Sample",
             "sample",
-            allow_space=not self.overlay_mode,
+            allow_space=False,
             size=(150, 0),
         )
+        if not self.overlay_mode:
+            imgui.same_line()
+            self._hold_button(
+                "Hold to Recognize",
+                "test",
+                allow_space=False,
+                size=(170, 0),
+            )
         previews = self._sample_previews(spell)
         available_width = imgui.get_content_region_avail().x
         columns = max(1, min(3, int(available_width // 190)))
@@ -621,11 +648,9 @@ class DesktopVoiceUi:
         imgui.text("Samples")
         imgui.same_line()
         self._hold_button(
-            "Record First Sample"
-            if self.overlay_mode
-            else "Record First Sample (Space)",
+            "Record First Sample",
             "sample",
-            allow_space=not self.overlay_mode,
+            allow_space=False,
             size=(190, 0),
         )
         imgui.text_wrapped(
@@ -734,19 +759,11 @@ class DesktopVoiceUi:
         imgui.text("Casting hand")
         imgui.text_disabled("The spellbook appears on the opposite hand.")
         current_hand = self.controller.config.openvr.pointer_hand
-        if current_hand == "right":
-            imgui.begin_disabled()
-        if imgui.button("Right"):
-            self.controller.set_casting_hand("right")
-        if current_hand == "right":
-            imgui.end_disabled()
-        imgui.same_line()
-        if current_hand == "left":
-            imgui.begin_disabled()
-        if imgui.button("Left"):
+        if imgui.radio_button("Left", current_hand == "left"):
             self.controller.set_casting_hand("left")
-        if current_hand == "left":
-            imgui.end_disabled()
+        imgui.same_line()
+        if imgui.radio_button("Right", current_hand == "right"):
+            self.controller.set_casting_hand("right")
 
         imgui.separator()
         imgui.text("Controller bindings")
@@ -963,7 +980,7 @@ class DesktopVoiceUi:
 
         scale_max = max(scale_max, value, threshold, 1e-6)
         width = min(size[0], max(120.0, imgui.get_content_region_avail().x - 8.0))
-        height = size[1]
+        height = max(size[1], imgui.get_text_line_height() * 1.3)
         origin = imgui.get_cursor_screen_pos()
         draw_list = imgui.get_window_draw_list()
         bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.12, 0.11, 0.15, 1.0))
@@ -1013,7 +1030,10 @@ class DesktopVoiceUi:
                 2.0,
             )
         draw_list.add_text(
-            imgui.ImVec2(origin.x + 5.0, origin.y + 1.0),
+            imgui.ImVec2(
+                origin.x + 5.0,
+                origin.y + max(1.0, (height - imgui.get_text_line_height()) * 0.5),
+            ),
             text,
             f"{label}: {value:.2f}",
         )
@@ -1033,7 +1053,16 @@ class DesktopVoiceUi:
         from imgui_bundle import imgui
 
         summary = self._osc_status_summary()
-        width = 56.0 + 72.0 + imgui.calc_text_size(summary).x + 28.0
+        style = imgui.get_style()
+        width = (
+            _checkbox_width("Voice")
+            + style.item_spacing.x
+            + _checkbox_width("Gesture")
+            + style.item_spacing.x
+            + imgui.calc_text_size(summary).x
+            + style.cell_padding.x * 2.0
+            + 24.0
+        )
         avail = imgui.get_content_region_avail().x
         if avail > width:
             imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + avail - width)
@@ -1403,7 +1432,7 @@ def _run_imgui(app: DesktopVoiceUi) -> None:
 
     params = hello_imgui.SimpleRunnerParams()
     params.window_title = "OSC Grimoire"
-    params.window_size = (1000, 760)
+    params.window_size = (1280, 860)
     params.gui_function = app.draw
     immapp.run(params)
 
@@ -1516,6 +1545,39 @@ def _shorten_ui_text(text: str, max_chars: int) -> str:
     if max_chars <= 3:
         return text[:max_chars]
     return f"...{text[-(max_chars - 3) :]}"
+
+
+def _left_elide_text_to_width(text: str, max_width: float) -> str:
+    from imgui_bundle import imgui
+
+    if max_width <= 0.0:
+        return ""
+    if imgui.calc_text_size(text).x <= max_width:
+        return text
+    prefix = "..."
+    if imgui.calc_text_size(prefix).x > max_width:
+        return ""
+    low = 0
+    high = len(text)
+    while low < high:
+        keep = (low + high + 1) // 2
+        candidate = f"{prefix}{text[-keep:]}"
+        if imgui.calc_text_size(candidate).x <= max_width:
+            low = keep
+        else:
+            high = keep - 1
+    return f"{prefix}{text[-low:]}" if low > 0 else prefix
+
+
+def _checkbox_width(label: str) -> float:
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    return (
+        imgui.get_frame_height()
+        + style.item_inner_spacing.x
+        + imgui.calc_text_size(label).x
+    )
 
 
 if __name__ == "__main__":
