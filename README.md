@@ -25,6 +25,19 @@ uv sync --group build
 The build writes `dist\osc-grimoire-windows.zip`. The unpacked executable is
 `dist\osc-grimoire\osc-grimoire-overlay.exe`.
 
+## GitHub release build
+
+Pushing a `v*` tag runs the Windows release workflow, uploads the zip artifact,
+and creates or updates the matching GitHub release:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow can also be run manually from GitHub Actions to produce a build
+artifact without publishing a release.
+
 ### Didst thou consort with demons to make this?
 
 I am the bone of my slop, etc, etc
