@@ -12,7 +12,6 @@ import numpy as np
 from .audio_capture import NonBlockingAudioRecorder
 from .desktop_controller import (
     DEFAULT_SAMPLE_TARGET,
-    EmbeddingPoint,
     GestureResult,
     RecognitionResult,
     VoiceTrainingController,
@@ -189,15 +188,16 @@ class DesktopVoiceUi:
             self._draw_gesture_canvas(
                 self.controller.gesture_preview(spell), size=(76, 42)
             )
+            if imgui.is_item_clicked():
+                self._open_spell_page(spell)
             imgui.table_next_column()
             clicked, _selected = imgui.selectable(
-                f"{spell.name}##row", spell.id == self.selected_spell_id
+                f"{spell.name}##row",
+                spell.id == self.selected_spell_id,
+                imgui.SelectableFlags_.span_all_columns,
             )
             if clicked:
-                self.selected_spell_id = spell.id
-                self.edit_name = spell.name
-                self.page = self._page_for_spell_id(spell.id)
-            imgui.text_disabled(f"{len(spell.voice_samples)} voice samples")
+                self._open_spell_page(spell)
             self._draw_spell_row_match(spell)
             imgui.pop_id()
         imgui.end_table()
@@ -206,24 +206,33 @@ class DesktopVoiceUi:
         latest_voice = self.controller.last_result
         latest_gesture = self.controller.last_gesture_result
         if self.controller.last_match_kind == "voice" and latest_voice is not None:
-            if latest_voice.ranking and latest_voice.ranking[0].spell_id == spell.id:
-                ratio = latest_voice.decision.margin_ratio
-                if ratio is not None:
-                    self._draw_threshold_bar(
-                        ratio,
-                        latest_voice.decision.margin_ratio_min,
-                        label="voice margin",
-                    )
+            row = _voice_ranking_for_spell(latest_voice, spell.id)
+            if row is not None:
+                score = _voice_match_score(latest_voice, row)
+                conflict = _voice_margin_conflict(latest_voice, spell.id)
+                self._draw_threshold_bar(
+                    score,
+                    0.0,
+                    label="voice",
+                    show_marker=False,
+                    state="conflict" if conflict else "normal",
+                    size=(260, 14),
+                )
             return
         if self.controller.last_match_kind == "gesture" and latest_gesture is not None:
-            if latest_gesture.decision.best_spell_id == spell.id:
-                margin = _gesture_margin(latest_gesture.ranking)
-                if margin is not None:
-                    self._draw_threshold_bar(
-                        margin,
-                        self.controller.config.gesture.margin_min,
-                        label="gesture margin",
-                    )
+            row = _gesture_ranking_for_spell(latest_gesture, spell.id)
+            if row is not None:
+                conflict = _gesture_margin_conflict(
+                    latest_gesture, spell.id, self.controller.config.gesture.margin_min
+                )
+                self._draw_threshold_bar(
+                    row.score,
+                    self.controller.config.gesture.score_min,
+                    label="gesture",
+                    show_marker=False,
+                    state="conflict" if conflict else "normal",
+                    size=(260, 14),
+                )
 
     def _draw_spell_page(self) -> None:
         from imgui_bundle import imgui
@@ -245,9 +254,7 @@ class DesktopVoiceUi:
         if not imgui.begin_table("##spell_page_folio", 2, table_flags):
             return
         imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch, 0.58)
-        imgui.table_setup_column(
-            "Embedding", imgui.TableColumnFlags_.width_stretch, 0.42
-        )
+        imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_stretch, 0.42)
         imgui.table_next_row()
         imgui.table_next_column()
         self._draw_spell_controls(spell)
@@ -255,8 +262,6 @@ class DesktopVoiceUi:
         if spell is not None:
             self._draw_samples(spell)
         imgui.table_next_column()
-        imgui.text("Embedding PCA")
-        self._draw_embedding_plot()
         if spell is not None:
             self._draw_gesture_preview(
                 "Saved Gesture", self.controller.gesture_preview(spell)
@@ -490,9 +495,6 @@ class DesktopVoiceUi:
         imgui.text("Last recognition")
         result = self.controller.last_result
         imgui.text_unformatted(result.debug_text if result is not None else "(none)")
-        imgui.separator()
-        imgui.text("Embedding PCA")
-        self._draw_embedding_plot()
         gesture_result = self.controller.last_gesture_result
         if gesture_result is not None:
             imgui.separator()
@@ -525,26 +527,21 @@ class DesktopVoiceUi:
         if not result.ranking:
             imgui.text_disabled(result.decision.reason)
             return
-        best_distance = max(result.ranking[0].aggregate_distance, 1e-6)
         for row in result.ranking:
-            score = min(best_distance / max(row.aggregate_distance, 1e-6), 1.0)
-            self._draw_threshold_bar(score, 0.0, label=row.name, show_marker=False)
-        if result.decision.intra_ratio is not None:
-            imgui.text_disabled("Intra gate: lower is better")
+            conflict = _voice_margin_conflict(result, row.spell_id)
             self._draw_threshold_bar(
-                result.decision.intra_ratio,
-                result.decision.intra_ratio_max,
-                label="intra",
-                higher_is_better=False,
-                scale_max=max(result.decision.intra_ratio_max * 1.5, 1.0),
+                _voice_match_score(result, row),
+                0.0,
+                label=row.name,
+                show_marker=False,
+                state="conflict" if conflict else "normal",
             )
-        if result.decision.margin_ratio is not None:
-            imgui.text_disabled("Margin gate: higher is better")
-            self._draw_threshold_bar(
-                result.decision.margin_ratio,
-                result.decision.margin_ratio_min,
-                label="margin",
-                scale_max=max(result.decision.margin_ratio_min * 2.0, 0.5),
+        if _voice_low_confidence(result):
+            imgui.text_disabled(f"Closest spell is weak: {result.ranking[0].name}")
+        elif _voice_margin_failure(result):
+            imgui.text_disabled(
+                f"Too close to choose: {result.ranking[0].name} / "
+                f"{result.ranking[1].name}"
             )
 
     def _draw_gesture_score_panel(self, result: GestureResult) -> None:
@@ -559,19 +556,19 @@ class DesktopVoiceUi:
             imgui.text_disabled(result.decision.reason)
             return
         for row in result.ranking:
+            conflict = _gesture_margin_conflict(
+                result, row.spell_id, self.controller.config.gesture.margin_min
+            )
             self._draw_threshold_bar(
                 row.score,
                 self.controller.config.gesture.score_min,
                 label=row.name,
+                state="conflict" if conflict else "normal",
             )
-        margin = _gesture_margin(result.ranking)
-        if margin is not None:
-            imgui.text_disabled("Margin gate: higher is better")
-            self._draw_threshold_bar(
-                margin,
-                self.controller.config.gesture.margin_min,
-                label="margin",
-                scale_max=max(self.controller.config.gesture.margin_min * 2.0, 0.5),
+        if _gesture_margin_failure(result, self.controller.config.gesture.margin_min):
+            imgui.text_disabled(
+                f"Too close to choose: {result.ranking[0].name} / "
+                f"{result.ranking[1].name}"
             )
 
     def _draw_threshold_bar(
@@ -584,6 +581,7 @@ class DesktopVoiceUi:
         show_marker: bool = True,
         scale_max: float = 1.0,
         size: tuple[float, float] = (260, 18),
+        state: str = "normal",
     ) -> None:
         from imgui_bundle import imgui
 
@@ -593,8 +591,12 @@ class DesktopVoiceUi:
         origin = imgui.get_cursor_screen_pos()
         draw_list = imgui.get_window_draw_list()
         bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.12, 0.11, 0.15, 1.0))
-        ok = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.28, 0.78, 0.38, 1.0))
-        bad = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.92, 0.35, 0.26, 1.0))
+        ok_color = imgui.ImVec4(0.28, 0.78, 0.38, 1.0)
+        bad_color = imgui.ImVec4(0.92, 0.35, 0.26, 1.0)
+        conflict_color = imgui.ImVec4(0.95, 0.68, 0.22, 1.0)
+        ok = imgui.color_convert_float4_to_u32(ok_color)
+        bad = imgui.color_convert_float4_to_u32(bad_color)
+        conflict = imgui.color_convert_float4_to_u32(conflict_color)
         marker = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 0.92, 0.35, 1.0))
         text = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.92, 0.92, 0.96, 1.0))
         passes = value >= threshold if higher_is_better else value <= threshold
@@ -605,7 +607,7 @@ class DesktopVoiceUi:
         draw_list.add_rect_filled(
             origin,
             imgui.ImVec2(origin.x + fill_width, origin.y + height),
-            ok if passes else bad,
+            conflict if state == "conflict" else ok if passes else bad,
             3.0,
         )
         if show_marker:
@@ -764,6 +766,11 @@ class DesktopVoiceUi:
         self.selected_spell_id = None
         return None
 
+    def _open_spell_page(self, spell: Spell) -> None:
+        self.selected_spell_id = spell.id
+        self.edit_name = spell.name
+        self.page = self._page_for_spell_id(spell.id)
+
     def _go_prev_page(self) -> None:
         pages = self._ordered_pages()
         index = pages.index(self.page) if self.page in pages else 0
@@ -830,27 +837,6 @@ class DesktopVoiceUi:
             previews.append(self.waveform_cache[cache_key])
         return previews
 
-    def _draw_embedding_plot(self) -> None:
-        from imgui_bundle import imgui, implot
-
-        points = self.controller.embedding_points()
-        if not points:
-            imgui.text("Embedding PCA: no samples yet.")
-            return
-
-        imgui.text("Embedding PCA: spell samples are circles; latest attempt is X.")
-        plot_flags = implot.Flags_.no_mouse_text
-        available_width = imgui.get_content_region_avail().x
-        plot_width = max(260.0, available_width)
-        if implot.begin_plot(
-            "##embedding_pca", imgui.ImVec2(plot_width, 260), plot_flags
-        ):
-            axis_flags = implot.AxisFlags_.no_decorations
-            implot.setup_axes("", "", axis_flags, axis_flags)
-            self._plot_sample_points(points)
-            self._plot_query_points(points)
-            implot.end_plot()
-
     def _draw_gesture_preview(
         self,
         label: str,
@@ -911,60 +897,6 @@ class DesktopVoiceUi:
         if implot.get_current_context() is None:
             implot.create_context()
         self._implot_context_created = True
-
-    def _plot_sample_points(self, points: tuple[EmbeddingPoint, ...]) -> None:
-        from imgui_bundle import implot
-
-        sample_groups = sorted({p.group for p in points if p.kind == "sample"})
-        for index, group in enumerate(sample_groups):
-            group_points = [
-                p for p in points if p.kind == "sample" and p.group == group
-            ]
-            if not group_points:
-                continue
-            color = _palette_color(index, 1.0)
-            spec = implot.Spec()
-            spec.marker = implot.Marker_.circle
-            spec.marker_size = 6.0
-            spec.marker_fill_color = color
-            spec.marker_line_color = color
-            spec.fill_color = color
-            spec.line_color = color
-            spec.fill_alpha = 1.0
-            spec.line_weight = 0.0
-            xs = np.array([p.x for p in group_points], dtype=np.float64)
-            ys = np.array([p.y for p in group_points], dtype=np.float64)
-            implot.plot_scatter(group, xs, ys, spec)
-
-    def _plot_query_points(self, points: tuple[EmbeddingPoint, ...]) -> None:
-        from imgui_bundle import imgui, implot
-
-        query_points = [p for p in points if p.kind == "query" and p.age == 0]
-        for point in query_points:
-            color = (
-                imgui.ImVec4(0.25, 1.0, 0.45, 1.0)
-                if point.accepted
-                else imgui.ImVec4(1.0, 0.35, 0.25, 1.0)
-            )
-            xs_all = [p.x for p in points]
-            ys_all = [p.y for p in points]
-            span = max(max(xs_all) - min(xs_all), max(ys_all) - min(ys_all), 1.0)
-            delta = span * 0.025
-            spec = implot.Spec()
-            spec.line_color = color
-            spec.line_weight = 2.0
-            implot.plot_line(
-                "latest attempt",
-                np.array([point.x - delta, point.x + delta], dtype=np.float64),
-                np.array([point.y - delta, point.y + delta], dtype=np.float64),
-                spec,
-            )
-            implot.plot_line(
-                "##latest_attempt_cross",
-                np.array([point.x - delta, point.x + delta], dtype=np.float64),
-                np.array([point.y + delta, point.y - delta], dtype=np.float64),
-                spec,
-            )
 
     def shutdown(self) -> None:
         if self.recorder is not None:
@@ -1061,6 +993,65 @@ def _gesture_margin(ranking: tuple[GestureRanking, ...]) -> float | None:
     if second.distance <= 1e-6:
         return 0.0
     return float((second.distance - ranking[0].distance) / second.distance)
+
+
+def _gesture_margin_failure(result: GestureResult, threshold: float) -> bool:
+    margin = _gesture_margin(result.ranking)
+    return margin is not None and margin < threshold
+
+
+def _gesture_margin_conflict(
+    result: GestureResult, spell_id: str, threshold: float
+) -> bool:
+    if not _gesture_margin_failure(result, threshold):
+        return False
+    return any(row.spell_id == spell_id for row in result.ranking[:2])
+
+
+def _gesture_ranking_for_spell(
+    result: GestureResult, spell_id: str
+) -> GestureRanking | None:
+    for row in result.ranking:
+        if row.spell_id == spell_id:
+            return row
+    return None
+
+
+def _voice_ranking_for_spell(result: RecognitionResult, spell_id: str):
+    for row in result.ranking:
+        if row.spell_id == spell_id:
+            return row
+    return None
+
+
+def _voice_match_score(result: RecognitionResult, row) -> float:
+    if not result.ranking:
+        return 0.0
+    best_distance = max(result.ranking[0].aggregate_distance, 1e-6)
+    return min(best_distance / max(row.aggregate_distance, 1e-6), 1.0)
+
+
+def _voice_low_confidence(result: RecognitionResult) -> bool:
+    decision = result.decision
+    return (
+        decision.intra_ratio is not None
+        and decision.intra_ratio > decision.intra_ratio_max
+    )
+
+
+def _voice_margin_failure(result: RecognitionResult) -> bool:
+    decision = result.decision
+    return (
+        decision.margin_ratio is not None
+        and decision.margin_ratio < decision.margin_ratio_min
+        and len(result.ranking) > 1
+    )
+
+
+def _voice_margin_conflict(result: RecognitionResult, spell_id: str) -> bool:
+    if not _voice_margin_failure(result):
+        return False
+    return any(row.spell_id == spell_id for row in result.ranking[:2])
 
 
 if __name__ == "__main__":
