@@ -166,6 +166,8 @@ class DesktopVoiceUi:
         imgui.table_next_row()
         imgui.table_next_column()
         imgui.text("Spells")
+        if not self.controller.spellbook.spells:
+            self._draw_main_empty_state()
         self._draw_spell_summary_table()
         imgui.table_next_column()
         self._draw_latest_score_panel()
@@ -174,6 +176,15 @@ class DesktopVoiceUi:
                 "Latest Gesture", self.controller.latest_gesture_points
             )
         imgui.end_table()
+
+    def _draw_main_empty_state(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text("No spells are trained yet.")
+        imgui.text_disabled("Add a spell, then train:")
+        imgui.bullet_text("Voice-only: record spoken samples.")
+        imgui.bullet_text("Gesture-only: record a wand motion.")
+        imgui.bullet_text("Both: train voice and gesture.")
 
     def _draw_spell_summary_table(self) -> None:
         from imgui_bundle import imgui
@@ -309,6 +320,8 @@ class DesktopVoiceUi:
         imgui.table_next_column()
         if spell is not None:
             self._draw_saved_gesture_section(spell)
+        elif self.controller.draft is not None:
+            self._draw_draft_gesture_guidance()
         if self.controller.latest_gesture_points is not None:
             self._draw_gesture_preview(
                 "Latest Gesture", self.controller.latest_gesture_points
@@ -535,7 +548,29 @@ class DesktopVoiceUi:
             allow_space=not self.overlay_mode,
             size=(190, 0),
         )
-        imgui.text_disabled("Recording a sample creates the spell.")
+        imgui.text_wrapped(
+            "Record a voice sample to create a voice spell. Aim for a normal, "
+            "repeatable pronunciation; you can add more samples after it is created."
+        )
+        imgui.bullet_text("Use 5-10 samples if recognition feels unreliable.")
+        imgui.bullet_text(
+            "Vary pace and volume a little, but keep the same incantation."
+        )
+
+    def _draw_draft_gesture_guidance(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text("Gesture")
+        if imgui.button("Record First Gesture"):
+            self.controller.armed_gesture_spell_id = "__draft__"
+            self.controller.status = (
+                "Armed gesture recording for draft. Hold grip and draw."
+            )
+        imgui.text_wrapped(
+            "Record a gesture to create a gesture spell. One clear, repeatable "
+            "stroke is enough to start; you can add voice samples later if wanted."
+        )
 
     def _draw_saved_gesture_section(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -1085,6 +1120,10 @@ class DesktopVoiceUi:
         self.selected_spell_id = spell.id
         self.edit_name = spell.name
         self.page = self._page_for_spell_id(spell.id)
+
+    def open_spell_after_gesture_action(self, result: object) -> None:
+        if isinstance(result, Spell):
+            self._open_spell_page(result)
 
     def _start_add_spell(self) -> None:
         self.controller.start_draft()

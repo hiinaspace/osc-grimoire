@@ -23,6 +23,7 @@ from osc_grimoire.openvr_overlay import (
     trail_transform_matrix,
     uv_to_imgui,
 )
+from osc_grimoire.spellbook import Spell
 
 
 def test_uv_to_imgui_preserves_overlay_y_axis() -> None:
@@ -190,8 +191,25 @@ def test_runner_routes_grip_stroke_to_controller() -> None:
     runner._update_gesture_capture(False, poses, poses[1])
 
     assert app.controller.gesture_count == 1
+    assert app.opened_gesture_results == [None]
     assert runner.vr_overlay.shown == [456]
     assert runner.vr_overlay.hidden == [456]
+
+
+def test_runner_opens_spell_page_after_gesture_creates_spell() -> None:
+    app = _FakeApp()
+    spell = Spell(id="spell_1", name="Wave")
+    app.controller.gesture_result = spell
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    runner.vr_overlay = _FakeOverlay()
+    runner.trail_overlay_handle = 456
+
+    runner._update_gesture_capture(True, poses, poses[1])
+    runner._update_gesture_capture(False, poses, poses[1])
+
+    assert app.opened_gesture_results == [spell]
 
 
 def test_runner_ignores_grip_when_gesture_disabled() -> None:
@@ -482,12 +500,14 @@ class _FakeController:
         self.ui_toggle_count = 0
         self.gesture_drawing: list[bool] = []
         self.voice_recording: list[bool] = []
+        self.gesture_result = None
         self.ui_enabled = True
         self.gesture_enabled = True
         self.voice_enabled = True
 
     def handle_gesture_stroke(self, _points) -> None:
         self.gesture_count += 1
+        return self.gesture_result
 
     def set_gesture_drawing(self, drawing: bool) -> None:
         self.gesture_drawing.append(drawing)
@@ -504,12 +524,16 @@ class _FakeApp:
         self.controller = _FakeController()
         self.voice_begin_count = 0
         self.voice_finish_count = 0
+        self.opened_gesture_results = []
 
     def begin_overlay_voice_recording(self) -> None:
         self.voice_begin_count += 1
 
     def finish_overlay_voice_recording(self) -> None:
         self.voice_finish_count += 1
+
+    def open_spell_after_gesture_action(self, result) -> None:
+        self.opened_gesture_results.append(result)
 
 
 class _FakeKeyboardApp:

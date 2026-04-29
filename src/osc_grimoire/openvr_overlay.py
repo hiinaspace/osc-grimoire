@@ -638,7 +638,8 @@ class OpenVrOverlayRunner:
             self._hide_gesture_trail()
             self.app.controller.set_gesture_drawing(False)
             try:
-                self.app.controller.handle_gesture_stroke(points)
+                result = self.app.controller.handle_gesture_stroke(points)
+                self.app.open_spell_after_gesture_action(result)
             except Exception as exc:
                 LOGGER.exception("Gesture action failed")
                 self.app.controller.status = str(exc)

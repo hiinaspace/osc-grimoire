@@ -366,6 +366,15 @@ class VoiceTrainingController:
         spell = self.persist_draft()
         return self.add_sample_to_spell(spell.id, audio)
 
+    def save_gesture_to_draft(self, points: FloatArray) -> Spell:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        if points.shape[0] < self.config.gesture.min_points:
+            raise ValueError(
+                f"Gesture needs at least {self.config.gesture.min_points} points"
+            )
+        spell = self.persist_draft()
+        return self.save_gesture_sample(spell.id, points)
+
     def delete_sample(self, spell_id: str, relative_path: str) -> Spell:
         spell = self._spell_or_raise(spell_id)
         self.spellbook = remove_voice_sample(self.spellbook, spell, relative_path)
@@ -419,6 +428,8 @@ class VoiceTrainingController:
         if self.armed_gesture_spell_id is not None:
             spell_id = self.armed_gesture_spell_id
             self.armed_gesture_spell_id = None
+            if spell_id == "__draft__":
+                return self.save_gesture_to_draft(points)
             return self.save_gesture_sample(spell_id, points)
         return self.recognize_gesture(points)
 

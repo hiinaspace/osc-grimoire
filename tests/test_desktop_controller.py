@@ -54,6 +54,39 @@ def test_controller_persists_draft_on_first_sample_and_deletes_sample(
     assert not sample_path.exists()
 
 
+def test_controller_persists_draft_on_first_gesture(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(min_points=3),
+    )
+    controller.start_draft()
+    controller.update_draft_name("Wave")
+
+    spell = controller.save_gesture_to_draft(_gesture_line())
+
+    assert spell.name == "Wave"
+    assert spell.voice_samples == ()
+    assert spell.has_gesture
+    assert len(spell.gesture_samples) == 1
+    assert load_spellbook(tmp_path).spells[0].id == spell.id
+
+
+def test_controller_does_not_persist_draft_on_short_first_gesture(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(min_points=4),
+    )
+    controller.start_draft()
+
+    with pytest.raises(ValueError, match="Gesture needs"):
+        controller.save_gesture_to_draft(np.zeros((2, 2), dtype=np.float32))
+
+    assert load_spellbook(tmp_path).spells == ()
+    assert controller.draft is not None
+
+
 def test_controller_deletes_spell_and_sample_directory(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     spell = controller.add_sample_to_draft(_audio(440))
