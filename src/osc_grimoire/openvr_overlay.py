@@ -236,7 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     controller.status = "Loading voice model..."
     controller.preload_backend()
     controller.status = "Starting OpenVR overlay..."
-    app = DesktopVoiceUi(
+    overlay_app = DesktopVoiceUi(
         controller,
         overlay_mode=True,
         surface_size=(
@@ -244,14 +244,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             controller.config.openvr.texture_height,
         ),
     )
-    runner = OpenVrOverlayRunner(app, controller.config.openvr)
+    desktop_app = DesktopVoiceUi(controller)
+    runner = OpenVrOverlayRunner(
+        overlay_app, controller.config.openvr, desktop_app=desktop_app
+    )
     try:
         runner.run()
     except OpenVrOverlayError as exc:
         LOGGER.error("%s", exc)
         return 1
     finally:
-        app.shutdown()
+        overlay_app.shutdown()
+        desktop_app.shutdown()
     return 0
 
 
@@ -260,8 +264,15 @@ class OpenVrOverlayError(RuntimeError):
 
 
 class OpenVrOverlayRunner:
-    def __init__(self, app: DesktopVoiceUi, config: OpenVrOverlayConfig) -> None:
+    def __init__(
+        self,
+        app: DesktopVoiceUi,
+        config: OpenVrOverlayConfig,
+        *,
+        desktop_app: DesktopVoiceUi | None = None,
+    ) -> None:
         self.app = app
+        self.desktop_app = desktop_app
         self.config = config
         self.renderer: HiddenGlfwImGuiRenderer | None = None
         self.openvr: Any = None
@@ -288,7 +299,9 @@ class OpenVrOverlayRunner:
     def run(self) -> None:
         self._init_openvr()
         self.renderer = HiddenGlfwImGuiRenderer(
-            self.config.texture_width, self.config.texture_height
+            self.config.texture_width,
+            self.config.texture_height,
+            visible=self.desktop_app is not None,
         )
         self.trail_texture = StrokeTrailTexture(
             self.config.gesture_trail_texture_size,
@@ -300,6 +313,9 @@ class OpenVrOverlayRunner:
             self.app.controller.status = "Ready."
             while not self.renderer.should_close():
                 self.renderer.poll_events()
+                if self.desktop_app is not None:
+                    self.renderer.render_desktop_frame(self.desktop_app.draw)
+                self.renderer.activate_overlay_context()
                 self._poll_overlay_events()
                 self.app.controller.tick_outputs()
                 self.config = self.app.controller.config.openvr
@@ -308,7 +324,8 @@ class OpenVrOverlayRunner:
                     self._update_overlay_transform()
                 self._inject_controller_input()
                 if self.app.controller.ui_enabled:
-                    self.renderer.render_frame(self.app.draw)
+                    self.renderer.prepare_overlay_input(self.mouse_state)
+                    self.renderer.render_overlay_frame(self.app.draw)
                     self._submit_overlay_texture()
                 time.sleep(1.0 / 90.0)
         except KeyboardInterrupt:
@@ -899,11 +916,18 @@ class OpenVrOverlayRunner:
 
 
 class HiddenGlfwImGuiRenderer:
-    def __init__(self, width: int, height: int) -> None:
+    def __init__(self, width: int, height: int, *, visible: bool = False) -> None:
         self.width = width
         self.height = height
-        self.window: Any = None
-        self.impl: Any = None
+        self.visible = visible
+        self.overlay_window: Any = None
+        self.overlay_impl: Any = None
+        self.overlay_imgui_context: Any = None
+        self.overlay_implot_context: Any = None
+        self.desktop_window: Any = None
+        self.desktop_impl: Any = None
+        self.desktop_imgui_context: Any = None
+        self.desktop_implot_context: Any = None
         self.framebuffer_id = 0
         self.texture_id = 0
         self.depth_buffer_id = 0
@@ -912,18 +936,51 @@ class HiddenGlfwImGuiRenderer:
     def should_close(self) -> bool:
         import glfw
 
-        return bool(glfw.window_should_close(self.window))
+        window = (
+            self.desktop_window
+            if self.desktop_window is not None
+            else self.overlay_window
+        )
+        return bool(glfw.window_should_close(window))
 
     def poll_events(self) -> None:
         import glfw
 
+        self.activate_desktop_context()
         glfw.poll_events()
 
-    def render_frame(self, draw: Any) -> None:
+    def activate_overlay_context(self) -> None:
+        import glfw
+        from imgui_bundle import imgui, implot
+
+        assert self.overlay_window is not None
+        assert self.overlay_imgui_context is not None
+        assert self.overlay_implot_context is not None
+        glfw.make_context_current(self.overlay_window)
+        imgui.set_current_context(self.overlay_imgui_context)
+        implot.set_imgui_context(self.overlay_imgui_context)
+        implot.set_current_context(self.overlay_implot_context)
+
+    def activate_desktop_context(self) -> None:
+        if self.desktop_window is None:
+            self.activate_overlay_context()
+            return
+        import glfw
+        from imgui_bundle import imgui, implot
+
+        assert self.desktop_imgui_context is not None
+        assert self.desktop_implot_context is not None
+        glfw.make_context_current(self.desktop_window)
+        imgui.set_current_context(self.desktop_imgui_context)
+        implot.set_imgui_context(self.desktop_imgui_context)
+        implot.set_current_context(self.desktop_implot_context)
+
+    def render_overlay_frame(self, draw: Any) -> None:
         import OpenGL.GL as gl
         from imgui_bundle import imgui
 
-        assert self.impl is not None
+        assert self.overlay_impl is not None
+        self.activate_overlay_context()
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.framebuffer_id)
         gl.glViewport(0, 0, self.width, self.height)
         gl.glClearColor(0.055, 0.045, 0.065, 1.0)
@@ -931,23 +988,68 @@ class HiddenGlfwImGuiRenderer:
             Any, gl.GL_DEPTH_BUFFER_BIT
         )
         gl.glClear(clear_flags)
-        self.impl.process_inputs()
         io = imgui.get_io()
         io.display_size = imgui.ImVec2(float(self.width), float(self.height))
         io.display_framebuffer_scale = imgui.ImVec2(1.0, 1.0)
         imgui.new_frame()
         draw()
         imgui.render()
-        self.impl.render(imgui.get_draw_data())
+        self.overlay_impl.render(imgui.get_draw_data())
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+    def prepare_overlay_input(self, mouse_state: OverlayMouseState) -> None:
+        from imgui_bundle import imgui
+
+        self.activate_overlay_context()
+        if not mouse_state.hovering:
+            imgui.get_io().add_mouse_pos_event(-1.0, -1.0)
+
+    def render_desktop_frame(self, draw: Any) -> None:
+        import glfw
+        import OpenGL.GL as gl
+        from imgui_bundle import imgui
+
+        if self.desktop_window is None:
+            return
+        assert self.desktop_impl is not None
+        self.activate_desktop_context()
+        framebuffer_width, framebuffer_height = glfw.get_framebuffer_size(
+            self.desktop_window
+        )
+        window_width, window_height = glfw.get_window_size(self.desktop_window)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, framebuffer_width, framebuffer_height)
+        gl.glClearColor(0.055, 0.045, 0.065, 1.0)
+        clear_flags = cast(Any, gl.GL_COLOR_BUFFER_BIT) | cast(
+            Any, gl.GL_DEPTH_BUFFER_BIT
+        )
+        gl.glClear(clear_flags)
+        self.desktop_impl.process_inputs()
+        io = imgui.get_io()
+        io.display_size = imgui.ImVec2(float(window_width), float(window_height))
+        io.display_framebuffer_scale = imgui.ImVec2(
+            framebuffer_width / max(float(window_width), 1.0),
+            framebuffer_height / max(float(window_height), 1.0),
+        )
+        imgui.new_frame()
+        draw()
+        imgui.render()
+        self.desktop_impl.render(imgui.get_draw_data())
+        glfw.swap_buffers(self.desktop_window)
 
     def shutdown(self) -> None:
         import glfw
         import OpenGL.GL as gl
 
-        if self.impl is not None:
-            self.impl.shutdown()
-            self.impl = None
+        if self.desktop_impl is not None:
+            self.activate_desktop_context()
+            self.desktop_impl.shutdown()
+            self.desktop_impl = None
+        if self.overlay_impl is not None:
+            self.activate_overlay_context()
+            self.overlay_impl.shutdown()
+            self.overlay_impl = None
+        self.activate_overlay_context()
         if self.framebuffer_id:
             gl.glDeleteFramebuffers(1, [self.framebuffer_id])
             self.framebuffer_id = 0
@@ -957,9 +1059,12 @@ class HiddenGlfwImGuiRenderer:
         if self.depth_buffer_id:
             gl.glDeleteRenderbuffers(1, [self.depth_buffer_id])
             self.depth_buffer_id = 0
-        if self.window is not None:
-            glfw.destroy_window(self.window)
-            self.window = None
+        if self.desktop_window is not None:
+            glfw.destroy_window(self.desktop_window)
+            self.desktop_window = None
+        if self.overlay_window is not None:
+            glfw.destroy_window(self.overlay_window)
+            self.overlay_window = None
         glfw.terminate()
 
     def _init(self) -> None:
@@ -969,22 +1074,37 @@ class HiddenGlfwImGuiRenderer:
 
         if not glfw.init():
             raise OpenVrOverlayError("Could not initialize GLFW.")
-        glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-        self.window = glfw.create_window(
+        glfw.window_hint(glfw.VISIBLE, glfw.FALSE)
+        self.overlay_window = glfw.create_window(
             self.width, self.height, "OSC Grimoire Overlay", None, None
         )
-        if self.window is None:
+        if self.overlay_window is None:
             glfw.terminate()
             raise OpenVrOverlayError("Could not create hidden OpenGL window.")
-        glfw.make_context_current(self.window)
+        glfw.make_context_current(self.overlay_window)
         glfw.swap_interval(0)
-        imgui.create_context()
-        implot.create_context()
-        self.impl = GlfwRenderer(self.window, attach_callbacks=False)
+        self.overlay_imgui_context = imgui.create_context()
+        self.overlay_implot_context = implot.create_context()
+        implot.set_imgui_context(self.overlay_imgui_context)
+        self.overlay_impl = GlfwRenderer(self.overlay_window, attach_callbacks=False)
         self._create_render_target()
+        if self.visible:
+            glfw.window_hint(glfw.VISIBLE, glfw.TRUE)
+            self.desktop_window = glfw.create_window(
+                1280, 860, "OSC Grimoire", None, None
+            )
+            if self.desktop_window is None:
+                raise OpenVrOverlayError("Could not create desktop OpenGL window.")
+            glfw.make_context_current(self.desktop_window)
+            glfw.swap_interval(0)
+            self.desktop_imgui_context = imgui.create_context()
+            self.desktop_implot_context = implot.create_context()
+            implot.set_imgui_context(self.desktop_imgui_context)
+            self.desktop_impl = GlfwRenderer(self.desktop_window, attach_callbacks=True)
+        self.activate_overlay_context()
 
     def _create_render_target(self) -> None:
         import OpenGL.GL as gl

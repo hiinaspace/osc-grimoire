@@ -203,9 +203,12 @@ class VoiceTrainingController:
         self.local_voice_enabled = enabled
         self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
 
+    def set_ui_enabled(self, enabled: bool) -> None:
+        self.local_ui_enabled = enabled
+        self.status = f"UI {'shown' if enabled else 'hidden'}."
+
     def toggle_ui_enabled(self) -> None:
-        self.local_ui_enabled = not self.local_ui_enabled
-        self.status = f"UI {'shown' if self.local_ui_enabled else 'hidden'}."
+        self.set_ui_enabled(not self.local_ui_enabled)
 
     def set_casting_hand(self, hand: str) -> None:
         if hand not in {"left", "right"}:

@@ -134,7 +134,10 @@ class DesktopVoiceUi:
         imgui.table_setup_column("Navigation", imgui.TableColumnFlags_.width_fixed, 320)
         imgui.table_setup_column("Page", imgui.TableColumnFlags_.width_stretch)
         imgui.table_setup_column("Activity", imgui.TableColumnFlags_.width_fixed, 210)
-        imgui.table_setup_column("Status", imgui.TableColumnFlags_.width_fixed, 320)
+        status_width = 320 if self.overlay_mode else 430
+        imgui.table_setup_column(
+            "Status", imgui.TableColumnFlags_.width_fixed, status_width
+        )
         imgui.table_next_row()
         imgui.table_next_column()
         if imgui.button("Main"):
@@ -1101,19 +1104,12 @@ class DesktopVoiceUi:
         from imgui_bundle import imgui
 
         summary = self._osc_status_summary()
-        style = imgui.get_style()
-        width = (
-            _checkbox_width("Voice")
-            + style.item_spacing.x
-            + _checkbox_width("Gesture")
-            + style.item_spacing.x
-            + imgui.calc_text_size(summary).x
-            + style.cell_padding.x * 2.0
-            + 24.0
-        )
-        avail = imgui.get_content_region_avail().x
-        if avail > width:
-            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + avail - width)
+        if not self.overlay_mode:
+            ui_enabled = self.controller.local_ui_enabled
+            changed, ui_enabled = imgui.checkbox("Spellbook", ui_enabled)
+            if changed:
+                self.controller.set_ui_enabled(ui_enabled)
+            imgui.same_line()
         voice_enabled = self.controller.local_voice_enabled
         changed, voice_enabled = imgui.checkbox("Voice", voice_enabled)
         if changed:

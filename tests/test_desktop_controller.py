@@ -206,6 +206,20 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
     assert not controller.gesture_enabled
 
 
+def test_controller_can_set_local_ui_visibility(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    controller.set_ui_enabled(False)
+
+    assert not controller.local_ui_enabled
+    assert not controller.ui_enabled
+
+    controller.set_ui_enabled(True)
+
+    assert controller.local_ui_enabled
+    assert controller.ui_enabled
+
+
 def test_controller_casting_hand_moves_book_to_opposite_hand(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
 
