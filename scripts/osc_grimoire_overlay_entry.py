@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import faulthandler
 import logging
 import sys
@@ -50,6 +51,27 @@ class _LogStream:
         return
 
 
+def _show_unhandled_exception_dialog(log_path: Path) -> None:
+    message = (
+        f"OSC Grimoire crashed during startup.\n\nDetails were written to:\n{log_path}"
+    )
+    try:
+        ctypes.windll.user32.MessageBoxW(None, message, "OSC Grimoire", 0x10)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Could not show unhandled exception dialog", exc_info=True
+        )
+
+
+def _run() -> int:
+    log_path = _configure_release_logging()
+    try:
+        return main()
+    except Exception:
+        logging.getLogger(__name__).exception("Unhandled fatal error")
+        _show_unhandled_exception_dialog(log_path)
+        return 1
+
+
 if __name__ == "__main__":
-    _configure_release_logging()
-    raise SystemExit(main())
+    raise SystemExit(_run())
