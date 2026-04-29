@@ -427,6 +427,16 @@ def test_desktop_ui_import_smoke() -> None:
     assert desktop_ui.PAGE_MAIN == 0
 
 
+def test_desktop_ui_extracts_osc_parameter_from_log() -> None:
+    from osc_grimoire.desktop_ui import _osc_parameter_from_log
+
+    assert (
+        _osc_parameter_from_log("[12:00:01] Accepted: Lumos (osc: CustomLumos)")
+        == "CustomLumos"
+    )
+    assert _osc_parameter_from_log("[12:00:01] Ready.") is None
+
+
 def test_desktop_ui_pages_follow_spell_order(tmp_path: Path) -> None:
     from osc_grimoire.desktop_ui import PAGE_DIAGNOSTICS, PAGE_MAIN, DesktopVoiceUi
 

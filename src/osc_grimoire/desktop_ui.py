@@ -243,7 +243,11 @@ class DesktopVoiceUi:
                 self._open_spell_page(spell)
             self._draw_spell_row_match(spell)
             imgui.table_next_column()
-            osc_label = f"osc: {self.controller.spell_osc_parameter_name(spell)}"
+            osc_parameter = self.controller.spell_osc_parameter_name(spell)
+            if not self.overlay_mode:
+                self._draw_copy_button(osc_parameter, tooltip="OSC parameter")
+                imgui.same_line()
+            osc_label = f"osc: {osc_parameter}"
             imgui.text_disabled(
                 _left_elide_text_to_width(
                     osc_label,
@@ -512,7 +516,11 @@ class DesktopVoiceUi:
         from imgui_bundle import imgui
 
         imgui.separator()
-        imgui.text(f"OSC parameter: {self.controller.spell_osc_parameter_name(spell)}")
+        osc_parameter = self.controller.spell_osc_parameter_name(spell)
+        imgui.text(f"OSC parameter: {osc_parameter}")
+        if not self.overlay_mode:
+            imgui.same_line()
+            self._draw_copy_button(osc_parameter, tooltip="OSC parameter")
         if self.osc_editing and self.osc_edit_spell_id == spell.id:
             if self.osc_focus_pending:
                 imgui.set_keyboard_focus_here()
@@ -797,17 +805,29 @@ class DesktopVoiceUi:
         imgui.text("OSC")
         prefix = self.controller.config.osc.parameter_prefix
         imgui.text_disabled("Outputs sent to VRChat:")
-        imgui.bullet_text(f"{prefix}VoiceRecording: true while voice is recording.")
-        imgui.bullet_text(f"{prefix}GestureDrawing: true while gesture is drawing.")
-        imgui.bullet_text(f"{prefix}Fizzle: brief pulse when recognition rejects.")
-        imgui.bullet_text(
-            f"{prefix}Spell<Name>: brief pulse when a spell is accepted; "
-            "customizable on each spell page."
+        self._draw_osc_help_parameter(
+            f"{prefix}VoiceRecording", "true while voice is recording."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}GestureDrawing", "true while gesture is drawing."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}Fizzle", "brief pulse when recognition rejects."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}Spell<Name>",
+            "brief pulse when a spell is accepted; customizable on each spell page.",
         )
         imgui.text_disabled("Inputs accepted from VRChat:")
-        imgui.bullet_text(f"{prefix}UIEnabled: show or hide the spellbook.")
-        imgui.bullet_text(f"{prefix}GestureEnabled: enable or disable gesture input.")
-        imgui.bullet_text(f"{prefix}VoiceEnabled: enable or disable voice input.")
+        self._draw_osc_help_parameter(
+            f"{prefix}UIEnabled", "show or hide the spellbook."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}GestureEnabled", "enable or disable gesture input."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}VoiceEnabled", "enable or disable voice input."
+        )
 
         imgui.separator()
         if imgui.collapsing_header("Diagnostics"):
@@ -834,6 +854,17 @@ class DesktopVoiceUi:
             setter(value)
         imgui.same_line()
         imgui.text("Strict")
+
+    def _draw_osc_help_parameter(self, parameter: str, description: str) -> None:
+        from imgui_bundle import imgui
+
+        imgui.bullet_text(f"{parameter}: {description}")
+        if self.overlay_mode:
+            return
+        imgui.same_line()
+        imgui.push_id(f"copy_{parameter}")
+        self._draw_copy_button(parameter, tooltip="OSC parameter")
+        imgui.pop_id()
 
     def _request_binding_settings(self) -> None:
         if self.bindings_request_handler is None:
@@ -1046,8 +1077,25 @@ class DesktopVoiceUi:
         if not entries:
             imgui.text_disabled("(no recent events)")
             return
-        for entry in entries:
-            imgui.text_unformatted(entry.format())
+        for index, entry in enumerate(entries):
+            line = entry.format()
+            imgui.text_unformatted(line)
+            if self.overlay_mode:
+                continue
+            copy_text = _osc_parameter_from_log(line) or line
+            imgui.same_line()
+            imgui.push_id(f"log_copy_{index}")
+            self._draw_copy_button(copy_text, tooltip="log OSC parameter")
+            imgui.pop_id()
+
+    def _draw_copy_button(self, text: str, *, tooltip: str) -> None:
+        from imgui_bundle import imgui
+
+        if imgui.small_button("Copy"):
+            imgui.set_clipboard_text(text)
+            self.controller.status = f"Copied {text}."
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(f"Copy {tooltip}")
 
     def _draw_top_status(self) -> None:
         from imgui_bundle import imgui
@@ -1567,6 +1615,19 @@ def _left_elide_text_to_width(text: str, max_width: float) -> str:
         else:
             high = keep - 1
     return f"{prefix}{text[-low:]}" if low > 0 else prefix
+
+
+def _osc_parameter_from_log(text: str) -> str | None:
+    marker = "(osc: "
+    start = text.find(marker)
+    if start < 0:
+        return None
+    start += len(marker)
+    end = text.find(")", start)
+    if end < 0:
+        return None
+    parameter = text[start:end].strip()
+    return parameter or None
 
 
 def _checkbox_width(label: str) -> float:
