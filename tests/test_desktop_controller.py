@@ -293,6 +293,74 @@ def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> 
     assert not ui._can_edit_spell_names()
 
 
+def test_desktop_ui_overlay_keyboard_finish_updates_spell(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    ui.keyboard_editing = True
+    ui.keyboard_edit_spell_id = spell.id
+    ui.edit_name = "Ignis"
+
+    ui.finish_keyboard_name(commit=True)
+
+    assert controller.spellbook.spells[0].name == "Ignis"
+    assert ui.edit_name == "Ignis"
+
+
+def test_desktop_ui_overlay_keyboard_cancel_restores_name(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    close_count = 0
+
+    def close_keyboard() -> None:
+        nonlocal close_count
+        close_count += 1
+
+    ui.keyboard_close_handler = close_keyboard
+    ui.keyboard_editing = True
+    ui.keyboard_edit_spell_id = spell.id
+    ui.keyboard_original_name = spell.name
+    ui.edit_name = "Changed"
+
+    ui.finish_keyboard_name(commit=False)
+
+    assert controller.spellbook.spells[0].name == spell.name
+    assert ui.edit_name == spell.name
+    assert close_count == 1
+
+
+def test_desktop_ui_spoken_name_requires_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    ui.selected_spell_id = spell.id
+    ui.keyboard_editing = True
+    ui.keyboard_edit_spell_id = spell.id
+    recorder = _FakeRecorder()
+    ui.recorder = cast("Any", recorder)
+    monkeypatch.setattr(controller, "suggest_spell_name", lambda _audio: "Lumos")
+
+    ui._begin_recording("name", "ui")
+    ui._finish_recording("name", "ui")
+
+    assert controller.spellbook.spells[0].name == spell.name
+    assert ui.edit_name == "Lumos"
+    assert ui.pending_spoken_name is None
+
+    ui.finish_keyboard_name(commit=True)
+
+    assert controller.spellbook.spells[0].name == "Lumos"
+
+
 def test_desktop_ui_button_release_does_not_end_overlay_recording(
     tmp_path: Path,
 ) -> None:

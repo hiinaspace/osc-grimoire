@@ -310,6 +310,88 @@ def test_trigger_off_overlay_finishes_voice_on_release(
     assert not runner.voice_trigger_down
 
 
+def test_openvr_keyboard_done_only_closes_osk_request() -> None:
+    app = _FakeKeyboardApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+
+    assert runner.request_spell_name_keyboard("spell-1", "Old Name")
+    runner.vr_overlay.events.append(
+        _FakeEvent(
+            _FakeOpenVr.VREvent_KeyboardDone, user_value=runner.keyboard_user_value
+        )
+    )
+
+    runner._poll_overlay_events()
+
+    assert app.finish_commits == []
+    assert runner.keyboard_request is None
+
+
+def test_openvr_keyboard_closed_only_closes_osk_request() -> None:
+    app = _FakeKeyboardApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+
+    assert runner.request_spell_name_keyboard(None, "Draft")
+    runner.vr_overlay.events.append(
+        _FakeEvent(
+            _FakeOpenVr.VREvent_KeyboardClosed, user_value=runner.keyboard_user_value
+        )
+    )
+
+    runner._poll_overlay_events()
+
+    assert app.cancel_count == 0
+    assert app.finish_commits == []
+    assert runner.keyboard_request is None
+
+
+def test_keyboard_event_text_decodes_bytes() -> None:
+    from osc_grimoire.openvr_overlay import _keyboard_event_text
+
+    event = _FakeEvent(_FakeOpenVr.VREvent_KeyboardCharInput, text="é")
+
+    assert _keyboard_event_text(event) == "é"
+
+
+def test_keyboard_event_injects_text_to_imgui() -> None:
+    from imgui_bundle import imgui
+
+    from osc_grimoire.openvr_overlay import _inject_keyboard_event_to_imgui
+
+    imgui.create_context()
+    try:
+        _inject_keyboard_event_to_imgui(
+            _FakeEvent(_FakeOpenVr.VREvent_KeyboardCharInput, text="a")
+        )
+        _inject_keyboard_event_to_imgui(
+            _FakeEvent(_FakeOpenVr.VREvent_KeyboardCharInput, text="\b")
+        )
+    finally:
+        imgui.destroy_context()
+
+
+def test_openvr_overlay_event_poll_unwraps_pyopenvr_tuple() -> None:
+    app = _FakeKeyboardApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_overlay = _FakeTupleOverlay()
+    runner.overlay_handle = 123
+    event = _FakeOpenVr.VREvent_t()
+    runner.vr_overlay.events.append(
+        _FakeEvent(_FakeOpenVr.VREvent_KeyboardDone, user_value=1)
+    )
+
+    assert runner._poll_next_overlay_event(event)
+    assert event.eventType == _FakeOpenVr.VREvent_KeyboardDone
+    assert not runner._poll_next_overlay_event(event)
+
+
 class _FakeController:
     status = ""
     config = type("Config", (), {"gesture": GestureRecognitionConfig()})()
@@ -345,6 +427,20 @@ class _FakeApp:
         self.voice_finish_count += 1
 
 
+class _FakeKeyboardApp:
+    def __init__(self) -> None:
+        self.controller = _FakeController()
+        self.finish_commits: list[bool] = []
+        self.cancel_count = 0
+        self.keyboard_request_handler = None
+
+    def finish_keyboard_name(self, *, commit: bool) -> None:
+        self.finish_commits.append(commit)
+
+    def cancel_keyboard_name(self) -> None:
+        self.cancel_count += 1
+
+
 class _FakeOpenVr:
     k_unTrackedDeviceIndexInvalid = 999
     k_unTrackedDeviceIndex_Hmd = 0
@@ -353,6 +449,25 @@ class _FakeOpenVr:
     TrackingUniverseStanding = 1
     TrackedControllerRole_LeftHand = 1
     TrackedControllerRole_RightHand = 2
+    k_EGamepadTextInputModeNormal = 0
+    k_EGamepadTextInputLineModeSingleLine = 0
+    KeyboardFlag_Minimal = 1
+    KeyboardFlag_Modal = 2
+    VREvent_KeyboardCharInput = 100
+    VREvent_KeyboardDone = 101
+    VREvent_KeyboardClosed = 102
+
+    class VREvent_t:
+        def __init__(self) -> None:
+            self.eventType = 0
+            self.data = SimpleNamespace(
+                keyboard=SimpleNamespace(uUserValue=0, overlayHandle=0, cNewInput=b"")
+            )
+
+    class HmdRect2_t:
+        def __init__(self) -> None:
+            self.vTopLeft = SimpleNamespace(v=[0.0, 0.0])
+            self.vBottomRight = SimpleNamespace(v=[0.0, 0.0])
 
 
 class _FakeSystem:
@@ -375,6 +490,8 @@ class _FakeOverlay:
     def __init__(self) -> None:
         self.shown: list[int] = []
         self.hidden: list[int] = []
+        self.events: list[_FakeEvent] = []
+        self.keyboard_text = ""
 
     def showOverlay(self, handle: int) -> None:
         self.shown.append(handle)
@@ -384,6 +501,49 @@ class _FakeOverlay:
 
     def setOverlayTransformAbsolute(self, _handle: int, _origin: int, _matrix) -> None:
         pass
+
+    def showKeyboardForOverlay(self, *_args) -> None:
+        pass
+
+    def setKeyboardPositionForOverlay(self, _handle: int, _rect) -> None:
+        pass
+
+    def pollNextOverlayEvent(self, _handle: int, event) -> bool:
+        if not self.events:
+            return False
+        next_event = self.events.pop(0)
+        event.eventType = next_event.eventType
+        event.data.keyboard.uUserValue = next_event.user_value
+        event.data.keyboard.cNewInput = next_event.text
+        return True
+
+    def getKeyboardText(self) -> str:
+        return self.keyboard_text
+
+    def hideKeyboard(self) -> None:
+        pass
+
+
+class _FakeTupleOverlay(_FakeOverlay):
+    def pollNextOverlayEvent(self, _handle: int, event):
+        if not self.events:
+            return False, event
+        super().pollNextOverlayEvent(_handle, event)
+        return True, event
+
+
+class _FakeEvent:
+    def __init__(self, event_type: int, *, user_value: int = 0, text: str = "") -> None:
+        self.eventType = event_type
+        self.user_value = user_value
+        self.text = text.encode("utf-8")
+        self.data = SimpleNamespace(
+            keyboard=SimpleNamespace(
+                uUserValue=user_value,
+                overlayHandle=0,
+                cNewInput=self.text,
+            )
+        )
 
 
 class _FakePose:

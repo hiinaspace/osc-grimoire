@@ -436,6 +436,27 @@ def test_ctc_greedy_token_ids_collapses_repeats_and_blanks() -> None:
     assert ctc_greedy_token_ids(log_probs, blank_id=3) == (1, 2)
 
 
+def test_ctc_spell_name_text_normalization() -> None:
+    from osc_grimoire.parakeet_ctc_backends import (
+        ctc_token_ids_to_text,
+        normalize_spoken_spell_name,
+    )
+
+    text = ctc_token_ids_to_text(
+        (1, 2, 3, 4, 5),
+        {
+            1: " alo",
+            2: "ho",
+            3: "<blk>",
+            4: "mora!",
+            5: "  ",
+        },
+    )
+
+    assert normalize_spoken_spell_name(text) == "Alohomora"
+    assert normalize_spoken_spell_name("...") == ""
+
+
 def test_ctc_sequence_log_probability_prefers_matching_sequence() -> None:
     from osc_grimoire.parakeet_ctc_backends import ctc_sequence_log_probability
 

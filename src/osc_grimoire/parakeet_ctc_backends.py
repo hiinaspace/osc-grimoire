@@ -4,6 +4,7 @@ import functools
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -87,6 +88,38 @@ def parakeet_ctc_token_labels(
         if len(parts) >= 2:
             labels[int(parts[-1])] = parts[0].replace("\u2581", " ")
     return labels
+
+
+def transcribe_parakeet_ctc_name(
+    audio: FloatArray,
+    config: VoiceRecognitionConfig,
+    sample_rate: int,
+    repo_id: str = DEFAULT_PARAKEET_CTC_REPO,
+) -> str:
+    feature = _extract_parakeet_ctc(audio, config, sample_rate, repo_id)
+    token_labels = parakeet_ctc_token_labels(repo_id)
+    return normalize_spoken_spell_name(
+        ctc_token_ids_to_text(feature.token_ids, token_labels)
+    )
+
+
+def ctc_token_ids_to_text(
+    token_ids: tuple[int, ...], token_labels: dict[int, str]
+) -> str:
+    parts: list[str] = []
+    for token_id in token_ids:
+        token = token_labels.get(token_id, "")
+        if token.startswith("<") and token.endswith(">"):
+            continue
+        parts.append(token)
+    return "".join(parts)
+
+
+def normalize_spoken_spell_name(text: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", " ", text).strip()
+    if not cleaned:
+        return ""
+    return " ".join(part.capitalize() for part in cleaned.split())
 
 
 def format_ctc_feature_distribution(

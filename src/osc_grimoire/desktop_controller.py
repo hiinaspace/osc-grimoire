@@ -228,6 +228,19 @@ class VoiceTrainingController:
         self.status = f"Renamed spell to {updated.name}."
         return updated
 
+    def suggest_spell_name(self, audio: FloatArray) -> str:
+        if audio.size == 0:
+            raise ValueError("No audio captured")
+        from .parakeet_ctc_backends import transcribe_parakeet_ctc_name
+
+        name = transcribe_parakeet_ctc_name(
+            audio, self.voice_config, self.config.audio.sample_rate
+        )
+        if not name:
+            raise ValueError("No spoken name detected")
+        self.status = f"Heard spell name: {name}."
+        return name
+
     def add_sample_to_spell(self, spell_id: str, audio: FloatArray) -> Spell:
         spell = self._spell_or_raise(spell_id)
         if audio.size == 0:

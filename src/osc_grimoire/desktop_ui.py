@@ -5,6 +5,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -47,6 +48,14 @@ class DesktopVoiceUi:
         self.recorder: NonBlockingAudioRecorder | None = None
         self.recorder_error: str | None = None
         self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
+        self.keyboard_request_handler: Callable[[str | None, str], bool] | None = None
+        self.keyboard_close_handler: Callable[[], None] | None = None
+        self.keyboard_edit_spell_id: str | None = None
+        self.keyboard_editing = False
+        self.keyboard_focus_pending = False
+        self.keyboard_original_name = ""
+        self.pending_spoken_name: str | None = None
+        self.pending_spoken_name_spell_id: str | None = None
         self._implot_context_created = False
 
     def draw(self) -> None:
@@ -216,6 +225,7 @@ class DesktopVoiceUi:
 
         if not self._can_edit_spell_names():
             imgui.text(f"Spell name: {self.edit_name}")
+            self._draw_overlay_rename_controls(spell)
         else:
             changed, new_name = imgui.input_text("Spell name", self.edit_name)
             if changed:
@@ -261,6 +271,111 @@ class DesktopVoiceUi:
         if spell is not None:
             if imgui.button("Record / Replace Gesture", imgui.ImVec2(230, 42)):
                 self.controller.arm_gesture_recording(spell.id)
+
+    def _draw_overlay_rename_controls(self, spell: Spell | None) -> None:
+        from imgui_bundle import imgui
+
+        target_spell_id = spell.id if spell is not None else None
+        if self.keyboard_editing and self.keyboard_edit_spell_id == target_spell_id:
+            if self.keyboard_focus_pending:
+                imgui.set_keyboard_focus_here()
+                self.keyboard_focus_pending = False
+            _submitted, new_name = imgui.input_text(
+                "Spell name",
+                self.edit_name,
+                imgui.InputTextFlags_.enter_returns_true,
+            )
+            self.edit_name = new_name
+            if imgui.button("Rename"):
+                self.finish_keyboard_name(commit=True)
+            imgui.same_line()
+            if imgui.button("Cancel"):
+                self.finish_keyboard_name(commit=False)
+            imgui.same_line()
+            if imgui.button("Show Keyboard"):
+                self._request_keyboard_rename(target_spell_id)
+            if imgui.get_content_region_avail().x < 140:
+                pass
+            else:
+                imgui.same_line()
+            self._hold_button(
+                "Speak Name",
+                "name",
+                allow_space=False,
+                size=(120, 0),
+            )
+        else:
+            if imgui.button("Edit Name", imgui.ImVec2(230, 42)):
+                self._request_keyboard_rename(target_spell_id)
+        if (
+            self.pending_spoken_name is None
+            or self.pending_spoken_name_spell_id != target_spell_id
+        ):
+            return
+        imgui.text(f"Heard: {self.pending_spoken_name}")
+        if imgui.button("Use Spoken Name"):
+            self.edit_name = self.pending_spoken_name
+            if not self.keyboard_editing:
+                self._apply_spell_name(target_spell_id, self.pending_spoken_name)
+            self.pending_spoken_name = None
+            self.pending_spoken_name_spell_id = None
+        imgui.same_line()
+        if imgui.button("Discard"):
+            self.pending_spoken_name = None
+            self.pending_spoken_name_spell_id = None
+            self.controller.status = "Spoken name discarded."
+
+    def _request_keyboard_rename(self, target_spell_id: str | None) -> None:
+        if self.keyboard_request_handler is None:
+            self.controller.status = "SteamVR keyboard is unavailable."
+            return
+        if self.keyboard_request_handler(target_spell_id, self.edit_name):
+            self.keyboard_edit_spell_id = target_spell_id
+            self.keyboard_editing = True
+            self.keyboard_focus_pending = True
+            self.keyboard_original_name = self.edit_name
+            self.controller.status = "SteamVR keyboard opened."
+        else:
+            self.controller.status = "Could not open SteamVR keyboard."
+
+    def finish_keyboard_name(self, *, commit: bool) -> None:
+        if not self.keyboard_editing:
+            return
+        target_spell_id = self.keyboard_edit_spell_id
+        self.keyboard_editing = False
+        self.keyboard_edit_spell_id = None
+        self.keyboard_focus_pending = False
+        if self.keyboard_close_handler is not None:
+            self.keyboard_close_handler()
+        if not commit:
+            self.edit_name = self.keyboard_original_name
+            self.keyboard_original_name = ""
+            self.cancel_keyboard_name()
+            return
+        self._apply_spell_name(target_spell_id, self.edit_name)
+        self.keyboard_original_name = ""
+
+    def cancel_keyboard_name(self) -> None:
+        self.keyboard_editing = False
+        self.keyboard_edit_spell_id = None
+        self.keyboard_focus_pending = False
+        if self.keyboard_original_name:
+            self.edit_name = self.keyboard_original_name
+            self.keyboard_original_name = ""
+        self.controller.status = "Keyboard rename cancelled."
+
+    def _apply_spell_name(self, target_spell_id: str | None, name: str) -> None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Spell name cannot be empty")
+        if target_spell_id is None:
+            self.controller.update_draft_name(clean_name)
+            self.edit_name = clean_name
+            self.controller.status = f"Draft renamed to {clean_name}."
+            return
+        spell = self.controller.rename_spell(target_spell_id, clean_name)
+        self.selected_spell_id = spell.id
+        self.edit_name = spell.name
 
     def _draw_samples(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -336,10 +451,17 @@ class DesktopVoiceUi:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
 
-    def _hold_button(self, label: str, mode: str, *, allow_space: bool) -> None:
+    def _hold_button(
+        self,
+        label: str,
+        mode: str,
+        *,
+        allow_space: bool,
+        size: tuple[float, float] = (230, 42),
+    ) -> None:
         from imgui_bundle import imgui
 
-        imgui.button(label, imgui.ImVec2(230, 42))
+        imgui.button(label, imgui.ImVec2(size[0], size[1]))
         button_held = imgui.is_item_active()
         space_held = allow_space and imgui.is_key_down(imgui.Key.space)
         held = button_held or space_held
@@ -361,7 +483,7 @@ class DesktopVoiceUi:
 
     def _begin_recording(self, mode: str, source: str) -> None:
         if (
-            mode == "recognize" or mode == "test"
+            mode == "recognize" or mode == "test" or mode == "name"
         ) and not self.controller.voice_enabled:
             self.controller.status = "Voice recognition disabled by OSC."
             return
@@ -396,6 +518,19 @@ class DesktopVoiceUi:
     def _handle_recording(self, mode: str, audio: FloatArray) -> None:
         if mode == "recognize" or mode == "test":
             self.controller.recognize(audio)
+            return
+        if mode == "name":
+            spoken_name = self.controller.suggest_spell_name(audio)
+            if self.keyboard_editing:
+                self.edit_name = spoken_name
+                self.pending_spoken_name = None
+                self.pending_spoken_name_spell_id = None
+            else:
+                self.pending_spoken_name = spoken_name
+                spell = self._selected_spell()
+                self.pending_spoken_name_spell_id = (
+                    spell.id if spell is not None else None
+                )
             return
         if mode == "sample":
             spell = self._selected_spell()

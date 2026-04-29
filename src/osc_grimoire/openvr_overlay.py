@@ -63,6 +63,12 @@ class OpenVrInputState:
     pose: Any | None
 
 
+@dataclass
+class SteamVrKeyboardRequest:
+    target_spell_id: str | None
+    user_value: int
+
+
 def action_manifest_path() -> Path:
     return Path(__file__).with_name("assets") / "actions.json"
 
@@ -267,7 +273,11 @@ class OpenVrOverlayRunner:
         self.trigger_down = False
         self.voice_trigger_down = False
         self.overlay_visible = True
+        self.keyboard_request: SteamVrKeyboardRequest | None = None
+        self.keyboard_user_value = 2001
         self._shutdown_openvr = False
+        self.app.keyboard_request_handler = self.request_spell_name_keyboard
+        self.app.keyboard_close_handler = self._hide_keyboard
 
     def run(self) -> None:
         self._init_openvr()
@@ -284,6 +294,7 @@ class OpenVrOverlayRunner:
             self.app.controller.status = "Ready."
             while not self.renderer.should_close():
                 self.renderer.poll_events()
+                self._poll_overlay_events()
                 self.app.controller.tick_outputs()
                 self._sync_overlay_visibility()
                 if self.app.controller.ui_enabled:
@@ -301,6 +312,7 @@ class OpenVrOverlayRunner:
     def shutdown(self) -> None:
         self.app.controller.set_voice_recording(False)
         self.app.controller.set_gesture_drawing(False)
+        self._hide_keyboard()
         if self.vr_overlay is not None and self.overlay_handle is not None:
             try:
                 self.vr_overlay.destroyOverlay(self.overlay_handle)
@@ -367,6 +379,107 @@ class OpenVrOverlayRunner:
                 "Could not start OpenVR overlay. Make sure SteamVR is running and "
                 "updated, then retry `uv run osc-grimoire-overlay --data-dir ./data`."
             ) from exc
+
+    def request_spell_name_keyboard(
+        self, target_spell_id: str | None, initial_name: str
+    ) -> bool:
+        if (
+            self.openvr is None
+            or self.vr_overlay is None
+            or self.overlay_handle is None
+        ):
+            return False
+        self.keyboard_user_value += 1
+        user_value = self.keyboard_user_value
+        flags = self.openvr.KeyboardFlag_Minimal | self.openvr.KeyboardFlag_Modal
+        try:
+            self.vr_overlay.showKeyboardForOverlay(
+                self.overlay_handle,
+                self.openvr.k_EGamepadTextInputModeNormal,
+                self.openvr.k_EGamepadTextInputLineModeSingleLine,
+                flags,
+                "Spell name",
+                48,
+                initial_name,
+                user_value,
+            )
+            self._set_keyboard_avoid_rect()
+        except Exception:
+            LOGGER.exception("Could not open SteamVR keyboard")
+            return False
+        self.keyboard_request = SteamVrKeyboardRequest(target_spell_id, user_value)
+        return True
+
+    def _set_keyboard_avoid_rect(self) -> None:
+        assert self.openvr is not None
+        assert self.vr_overlay is not None
+        assert self.overlay_handle is not None
+        rect = self.openvr.HmdRect2_t()
+        rect.vTopLeft.v[0] = 0.0
+        rect.vTopLeft.v[1] = 1.0
+        rect.vBottomRight.v[0] = 1.0
+        rect.vBottomRight.v[1] = 0.0
+        self.vr_overlay.setKeyboardPositionForOverlay(self.overlay_handle, rect)
+
+    def _poll_overlay_events(self) -> None:
+        if (
+            self.openvr is None
+            or self.vr_overlay is None
+            or self.overlay_handle is None
+        ):
+            return
+        event = self.openvr.VREvent_t()
+        while self._poll_next_overlay_event(event):
+            self._handle_overlay_event(event)
+
+    def _poll_next_overlay_event(self, event: Any) -> bool:
+        assert self.vr_overlay is not None
+        assert self.overlay_handle is not None
+        result = self.vr_overlay.pollNextOverlayEvent(self.overlay_handle, event)
+        if isinstance(result, tuple):
+            has_event, returned_event = result
+            if returned_event is not event:
+                event.eventType = returned_event.eventType
+                event.data = returned_event.data
+            return bool(has_event)
+        return bool(result)
+
+    def _handle_overlay_event(self, event: Any) -> None:
+        if self.openvr is None:
+            return
+        if event.eventType == self.openvr.VREvent_KeyboardCharInput:
+            _inject_keyboard_event_to_imgui(event)
+        elif event.eventType in (
+            self.openvr.VREvent_KeyboardDone,
+            self.openvr.VREvent_KeyboardClosed,
+        ):
+            self.keyboard_request = None
+
+    def _finish_keyboard_request(self) -> None:
+        if self.keyboard_request is None:
+            return
+        try:
+            self.app.finish_keyboard_name(commit=True)
+        except Exception as exc:
+            LOGGER.exception("Keyboard rename failed")
+            self.app.controller.status = str(exc)
+        finally:
+            self.keyboard_request = None
+
+    def _cancel_keyboard_request(self) -> None:
+        if self.keyboard_request is None:
+            return
+        self.keyboard_request = None
+        self.app.cancel_keyboard_name()
+
+    def _hide_keyboard(self) -> None:
+        if self.vr_overlay is None or self.keyboard_request is None:
+            return
+        try:
+            self.vr_overlay.hideKeyboard()
+        except Exception:
+            LOGGER.debug("Failed to hide SteamVR keyboard", exc_info=True)
+        self.keyboard_request = None
 
     def _register_application_manifest(self) -> None:
         assert self.openvr is not None
@@ -970,6 +1083,37 @@ def _draw_point(pixels: np.ndarray, point: tuple[int, int], *, radius: int) -> N
         for px in range(max(0, x - radius), min(width, x + radius + 1)):
             if (px - x) * (px - x) + (py - y) * (py - y) <= radius * radius:
                 pixels[py, px] = (64, 255, 96, 230)
+
+
+def _keyboard_event_text(event: Any) -> str:
+    raw = event.data.keyboard.cNewInput
+    if isinstance(raw, str):
+        return raw.rstrip("\x00")
+    if isinstance(raw, bytes):
+        return raw.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
+    try:
+        data = bytes(raw)
+    except TypeError:
+        return ""
+    return data.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
+
+
+def _inject_keyboard_event_to_imgui(event: Any) -> None:
+    from imgui_bundle import imgui
+
+    text = _keyboard_event_text(event)
+    if not text:
+        return
+    io = imgui.get_io()
+    for character in text:
+        if character == "\b":
+            io.add_key_event(imgui.Key.backspace, True)
+            io.add_key_event(imgui.Key.backspace, False)
+        elif character == "\n":
+            io.add_key_event(imgui.Key.enter, True)
+            io.add_key_event(imgui.Key.enter, False)
+        else:
+            io.add_input_characters_utf8(character)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
