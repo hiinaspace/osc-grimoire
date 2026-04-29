@@ -56,6 +56,7 @@ class DesktopVoiceUi:
         )
         self.keyboard_close_handler: Callable[[], None] | None = None
         self.bindings_request_handler: Callable[[], bool] | None = None
+        self.overlay_start_handler: Callable[[], bool] | None = None
         self.keyboard_edit_spell_id: str | None = None
         self.keyboard_editing = False
         self.keyboard_focus_pending = False
@@ -131,7 +132,14 @@ class DesktopVoiceUi:
         )
         if not imgui.begin_table("##top_bar", 4, table_flags):
             return
-        imgui.table_setup_column("Navigation", imgui.TableColumnFlags_.width_fixed, 320)
+        navigation_width = (
+            430
+            if not self.overlay_mode and self.overlay_start_handler is not None
+            else 320
+        )
+        imgui.table_setup_column(
+            "Navigation", imgui.TableColumnFlags_.width_fixed, navigation_width
+        )
         imgui.table_setup_column("Page", imgui.TableColumnFlags_.width_stretch)
         imgui.table_setup_column("Activity", imgui.TableColumnFlags_.width_fixed, 210)
         status_width = 320 if self.overlay_mode else 430
@@ -154,6 +162,10 @@ class DesktopVoiceUi:
         imgui.same_line()
         if imgui.button("Next"):
             self._go_next_page()
+        if not self.overlay_mode and self.overlay_start_handler is not None:
+            imgui.same_line()
+            if imgui.button("Start Overlay"):
+                self._request_overlay_start()
         imgui.table_next_column()
         imgui.text(f"Page: {self._page_title()}")
         imgui.table_next_column()
@@ -877,6 +889,15 @@ class DesktopVoiceUi:
             self.controller.status = "Opening SteamVR bindings..."
         else:
             self.controller.status = "Could not open SteamVR bindings."
+
+    def _request_overlay_start(self) -> None:
+        if self.overlay_start_handler is None:
+            self.controller.status = "Overlay startup is unavailable."
+            return
+        if self.overlay_start_handler():
+            self.controller.status = "Starting SteamVR overlay..."
+        else:
+            self.controller.status = "Could not start SteamVR overlay."
 
     def _draw_diagnostics_details(self) -> None:
         from imgui_bundle import imgui

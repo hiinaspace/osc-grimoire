@@ -5,6 +5,7 @@ import ctypes
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -218,6 +219,35 @@ def ray_from_pose(pose: Any) -> Ray:
     return Ray(source=source, direction=direction)
 
 
+def is_steamvr_running() -> bool:
+    try:
+        import psutil
+    except ImportError:
+        return False
+    process_names = {"vrserver.exe", "vrmonitor.exe", "vrdashboard.exe"}
+    for process in psutil.process_iter(["name"]):
+        try:
+            name = (process.info.get("name") or "").lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if name in process_names:
+            return True
+    return False
+
+
+def _start_steamvr() -> None:
+    try:
+        os.startfile("steam://rungameid/250820")  # type: ignore[attr-defined]
+    except Exception:
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", "steam://rungameid/250820"],
+                shell=False,
+            )
+        except Exception:
+            LOGGER.debug("Could not request SteamVR startup", exc_info=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(
@@ -235,6 +265,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     controller.status = "Loading voice model..."
     controller.preload_backend()
+    if not args.start_overlay and not is_steamvr_running():
+        controller.status = "Desktop mode. Start SteamVR overlay when ready."
+        app = DesktopVoiceUi(controller)
+        runner = DesktopPreflightRunner(app)
+        try:
+            should_start = runner.run()
+        finally:
+            app.shutdown()
+        if not should_start:
+            return 0
     controller.status = "Starting OpenVR overlay..."
     overlay_app = DesktopVoiceUi(
         controller,
@@ -261,6 +301,37 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 class OpenVrOverlayError(RuntimeError):
     pass
+
+
+class DesktopPreflightRunner:
+    def __init__(self, app: DesktopVoiceUi) -> None:
+        self.app = app
+        self.renderer: HiddenGlfwImGuiRenderer | None = None
+        self.should_start_overlay = False
+        self.app.overlay_start_handler = self.request_overlay_start
+
+    def run(self) -> bool:
+        self.renderer = HiddenGlfwImGuiRenderer(1000, 760, visible=True)
+        try:
+            while not self.renderer.should_close() and not self.should_start_overlay:
+                self.renderer.poll_events()
+                self.app.controller.tick_outputs()
+                self.renderer.render_desktop_frame(self.app.draw)
+                time.sleep(1.0 / 60.0)
+            return self.should_start_overlay
+        finally:
+            self.shutdown()
+
+    def request_overlay_start(self) -> bool:
+        self.should_start_overlay = True
+        _start_steamvr()
+        return True
+
+    def shutdown(self) -> None:
+        self.app.overlay_start_handler = None
+        if self.renderer is not None:
+            self.renderer.shutdown()
+            self.renderer = None
 
 
 class OpenVrOverlayRunner:
@@ -1289,6 +1360,11 @@ def _inject_keyboard_event_to_imgui(event: Any) -> None:
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OSC Grimoire OpenVR overlay")
     parser.add_argument("--data-dir", default=None)
+    parser.add_argument(
+        "--start-overlay",
+        action="store_true",
+        help="Initialize OpenVR immediately, even if SteamVR is not already running.",
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",

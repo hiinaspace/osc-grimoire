@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -9,6 +10,7 @@ from osc_grimoire.config import GestureRecognitionConfig, OpenVrOverlayConfig
 from osc_grimoire.desktop_ui import DesktopVoiceUi
 from osc_grimoire.openvr_overlay import (
     APP_KEY,
+    DesktopPreflightRunner,
     OpenVrActionHandles,
     OpenVrInputState,
     OpenVrOverlayRunner,
@@ -16,6 +18,7 @@ from osc_grimoire.openvr_overlay import (
     action_manifest_path,
     ensure_application_manifest,
     is_button_pressed,
+    is_steamvr_running,
     is_trigger_pressed,
     next_mouse_events,
     overlay_transform_matrix,
@@ -104,6 +107,34 @@ def test_openvr_overlay_import_smoke() -> None:
     import osc_grimoire.openvr_overlay as openvr_overlay
 
     assert openvr_overlay.OVERLAY_KEY == "space.hiina.osc_grimoire.spellbook"
+
+
+def test_steamvr_running_detects_vr_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcess:
+        info = {"name": "vrserver.exe"}
+
+    fake_psutil = SimpleNamespace(
+        process_iter=lambda _attrs: [FakeProcess()],
+        NoSuchProcess=RuntimeError,
+        AccessDenied=PermissionError,
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    assert is_steamvr_running()
+
+
+def test_desktop_preflight_start_request_sets_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import osc_grimoire.openvr_overlay as openvr_overlay
+
+    app = _FakeApp()
+    monkeypatch.setattr(openvr_overlay, "_start_steamvr", lambda: None)
+    runner = DesktopPreflightRunner(cast(DesktopVoiceUi, app))
+
+    assert runner.request_overlay_start()
+
+    assert runner.should_start_overlay
 
 
 def test_application_manifest_registers_action_manifest() -> None:
