@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -106,6 +108,15 @@ class EmbeddingPoint:
     accepted: bool | None = None
 
 
+@dataclass(frozen=True)
+class UiLogEntry:
+    timestamp: datetime
+    message: str
+
+    def format(self) -> str:
+        return f"[{self.timestamp:%H:%M}] {self.message}"
+
+
 class VoiceTrainingController:
     def __init__(
         self,
@@ -129,8 +140,10 @@ class VoiceTrainingController:
         self.status = "Ready."
         self.last_result: RecognitionResult | None = None
         self.last_gesture_result: GestureResult | None = None
+        self.last_match_kind: str | None = None
         self.latest_gesture_points: FloatArray | None = None
         self.armed_gesture_spell_id: str | None = None
+        self.ui_log: deque[UiLogEntry] = deque(maxlen=12)
         self.recent_query_vectors: list[tuple[FloatArray, Decision, str]] = []
         self._backend_stats: BackendStats | None = None
         self._feature_cache: dict[Path, VoiceFeature] | None = None
@@ -147,6 +160,9 @@ class VoiceTrainingController:
         if self.osc_input is None:
             return ()
         return self.osc_input.recent_messages()
+
+    def add_log(self, message: str) -> None:
+        self.ui_log.append(UiLogEntry(datetime.now(), message))
 
     @property
     def ui_enabled(self) -> bool:
@@ -318,7 +334,9 @@ class VoiceTrainingController:
                 debug_text="gesture: rejected (gesture too short)",
             )
             self.last_gesture_result = result
+            self.last_match_kind = "gesture"
             self.status = "Gesture rejected."
+            self.add_log("Gesture rejected: gesture too short")
             self._emit_gesture_result(result)
             return result
         templates = load_gesture_templates(self.spellbook, self.config.gesture)
@@ -329,9 +347,15 @@ class VoiceTrainingController:
             debug_text=format_gesture_debug(raw_result.ranking, raw_result.decision),
         )
         self.last_gesture_result = result
+        self.last_match_kind = "gesture"
         self.status = (
             "Gesture accepted." if result.decision.accepted else "Gesture rejected."
         )
+        if result.decision.accepted and result.decision.best_spell_id is not None:
+            spell = self._spell_or_raise(result.decision.best_spell_id)
+            self.add_log(f"Gesture cast: {spell.name}")
+        else:
+            self.add_log(f"Gesture fizzle: {result.decision.reason}")
         self._emit_gesture_result(result)
         return result
 
@@ -359,11 +383,16 @@ class VoiceTrainingController:
             debug_text=format_recognition_debug(ranking, decision),
         )
         self.last_result = result
+        self.last_match_kind = "voice"
         best_name = ranking[0].name if ranking else "(none)"
         if isinstance(query, np.ndarray):
             self.recent_query_vectors.append((_mean_vector(query), decision, best_name))
             self.recent_query_vectors = self.recent_query_vectors[-8:]
         self.status = "Accepted." if decision.accepted else "Rejected."
+        if decision.accepted and ranking:
+            self.add_log(f"Voice cast: {ranking[0].name}")
+        else:
+            self.add_log(f"Voice fizzle: {decision.reason}")
         self._emit_recognition_result(result)
         return result
 

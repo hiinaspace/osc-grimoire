@@ -104,6 +104,7 @@ def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
 
     assert output.spell_pulses == ["Low"]
     assert output.fizzle_count == 0
+    assert controller.ui_log[-1].message == "Voice cast: Low"
 
 
 def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
@@ -115,6 +116,7 @@ def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
 
     assert output.spell_pulses == []
     assert output.fizzle_count == 1
+    assert controller.ui_log[-1].message.startswith("Voice fizzle:")
 
 
 def test_controller_embedding_points_include_samples_and_recent_queries(
@@ -235,6 +237,7 @@ def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
 
     assert output.spell_pulses == [spell.name]
     assert output.fizzle_count == 1
+    assert controller.ui_log[-1].message == "Gesture rejected: gesture too short"
 
 
 def test_controller_rejects_short_gesture_without_mutation(tmp_path: Path) -> None:

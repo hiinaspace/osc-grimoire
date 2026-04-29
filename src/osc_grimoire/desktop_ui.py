@@ -13,8 +13,11 @@ from .audio_capture import NonBlockingAudioRecorder
 from .desktop_controller import (
     DEFAULT_SAMPLE_TARGET,
     EmbeddingPoint,
+    GestureResult,
+    RecognitionResult,
     VoiceTrainingController,
 )
+from .gesture_recognizer import GestureRanking
 from .osc_input import OscInputService
 from .osc_output import OscOutput
 from .paths import default_data_dir
@@ -56,12 +59,15 @@ class DesktopVoiceUi:
         self.keyboard_original_name = ""
         self.pending_spoken_name: str | None = None
         self.pending_spoken_name_spell_id: str | None = None
+        self._last_logged_input_status: str | None = None
+        self._last_logged_output_status: str | None = None
         self._implot_context_created = False
 
     def draw(self) -> None:
         from imgui_bundle import imgui
 
         self.controller.tick_outputs()
+        self._log_status_changes()
         self._ensure_implot_context()
         window_flags = imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_collapse
         if self.overlay_mode:
@@ -145,15 +151,7 @@ class DesktopVoiceUi:
         imgui.table_next_row()
         imgui.table_next_column()
         imgui.text("Spells")
-        imgui.text("Use Prev/Next to flip to each spell page.")
-        for spell in self.controller.spellbook.spells:
-            label = f"{spell.name} ({len(spell.voice_samples)} samples)"
-            selected = spell.id == self.selected_spell_id
-            clicked, _selected = imgui.selectable(label, selected)
-            if clicked:
-                self.selected_spell_id = spell.id
-                self.edit_name = spell.name
-                self.page = self._page_for_spell_id(spell.id)
+        self._draw_spell_summary_table()
         imgui.separator()
         self._hold_button(
             "Hold to Recognize" if self.overlay_mode else "Hold to Recognize (Space)",
@@ -161,22 +159,71 @@ class DesktopVoiceUi:
             allow_space=not self.overlay_mode,
         )
 
-        result = self.controller.last_result
-        if result is not None:
-            imgui.separator()
-            imgui.text_unformatted(result.debug_text)
-        gesture_result = self.controller.last_gesture_result
-        if gesture_result is not None:
-            imgui.separator()
-            imgui.text_unformatted(gesture_result.debug_text)
+        imgui.separator()
+        self._draw_event_log()
         imgui.table_next_column()
-        imgui.text("Embedding PCA")
-        self._draw_embedding_plot()
+        self._draw_latest_score_panel()
         if self.controller.latest_gesture_points is not None:
             self._draw_gesture_preview(
                 "Latest Gesture", self.controller.latest_gesture_points
             )
         imgui.end_table()
+
+    def _draw_spell_summary_table(self) -> None:
+        from imgui_bundle import imgui
+
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_prop
+            | imgui.TableFlags_.row_bg
+            | imgui.TableFlags_.borders_inner_h
+            | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##spell_summary", 2, table_flags):
+            return
+        imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_fixed, 92)
+        imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch)
+        for spell in self.controller.spellbook.spells:
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.push_id(spell.id)
+            self._draw_gesture_canvas(
+                self.controller.gesture_preview(spell), size=(76, 42)
+            )
+            imgui.table_next_column()
+            clicked, _selected = imgui.selectable(
+                f"{spell.name}##row", spell.id == self.selected_spell_id
+            )
+            if clicked:
+                self.selected_spell_id = spell.id
+                self.edit_name = spell.name
+                self.page = self._page_for_spell_id(spell.id)
+            imgui.text_disabled(f"{len(spell.voice_samples)} voice samples")
+            self._draw_spell_row_match(spell)
+            imgui.pop_id()
+        imgui.end_table()
+
+    def _draw_spell_row_match(self, spell: Spell) -> None:
+        latest_voice = self.controller.last_result
+        latest_gesture = self.controller.last_gesture_result
+        if self.controller.last_match_kind == "voice" and latest_voice is not None:
+            if latest_voice.ranking and latest_voice.ranking[0].spell_id == spell.id:
+                ratio = latest_voice.decision.margin_ratio
+                if ratio is not None:
+                    self._draw_threshold_bar(
+                        ratio,
+                        latest_voice.decision.margin_ratio_min,
+                        label="voice margin",
+                    )
+            return
+        if self.controller.last_match_kind == "gesture" and latest_gesture is not None:
+            if latest_gesture.decision.best_spell_id == spell.id:
+                margin = _gesture_margin(latest_gesture.ranking)
+                if margin is not None:
+                    self._draw_threshold_bar(
+                        margin,
+                        self.controller.config.gesture.margin_min,
+                        label="gesture margin",
+                    )
 
     def _draw_spell_page(self) -> None:
         from imgui_bundle import imgui
@@ -451,6 +498,142 @@ class DesktopVoiceUi:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
 
+    def _draw_latest_score_panel(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text("Latest Match Scores")
+        if (
+            self.controller.last_match_kind == "voice"
+            and self.controller.last_result is not None
+        ):
+            self._draw_voice_score_panel(self.controller.last_result)
+            return
+        if (
+            self.controller.last_match_kind == "gesture"
+            and self.controller.last_gesture_result is not None
+        ):
+            self._draw_gesture_score_panel(self.controller.last_gesture_result)
+            return
+        imgui.text_disabled("No match attempts yet.")
+
+    def _draw_voice_score_panel(self, result: RecognitionResult) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text(
+            "Voice accepted" if result.decision.accepted else "Voice rejected/fizzle"
+        )
+        if not result.ranking:
+            imgui.text_disabled(result.decision.reason)
+            return
+        best_distance = max(result.ranking[0].aggregate_distance, 1e-6)
+        for row in result.ranking:
+            score = min(best_distance / max(row.aggregate_distance, 1e-6), 1.0)
+            self._draw_threshold_bar(score, 0.0, label=row.name, show_marker=False)
+        if result.decision.intra_ratio is not None:
+            imgui.text_disabled("Intra gate: lower is better")
+            self._draw_threshold_bar(
+                result.decision.intra_ratio,
+                result.decision.intra_ratio_max,
+                label="intra",
+                higher_is_better=False,
+                scale_max=max(result.decision.intra_ratio_max * 1.5, 1.0),
+            )
+        if result.decision.margin_ratio is not None:
+            imgui.text_disabled("Margin gate: higher is better")
+            self._draw_threshold_bar(
+                result.decision.margin_ratio,
+                result.decision.margin_ratio_min,
+                label="margin",
+                scale_max=max(result.decision.margin_ratio_min * 2.0, 0.5),
+            )
+
+    def _draw_gesture_score_panel(self, result: GestureResult) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text(
+            "Gesture accepted"
+            if result.decision.accepted
+            else "Gesture rejected/fizzle"
+        )
+        if not result.ranking:
+            imgui.text_disabled(result.decision.reason)
+            return
+        for row in result.ranking:
+            self._draw_threshold_bar(
+                row.score,
+                self.controller.config.gesture.score_min,
+                label=row.name,
+            )
+        margin = _gesture_margin(result.ranking)
+        if margin is not None:
+            imgui.text_disabled("Margin gate: higher is better")
+            self._draw_threshold_bar(
+                margin,
+                self.controller.config.gesture.margin_min,
+                label="margin",
+                scale_max=max(self.controller.config.gesture.margin_min * 2.0, 0.5),
+            )
+
+    def _draw_threshold_bar(
+        self,
+        value: float,
+        threshold: float,
+        *,
+        label: str,
+        higher_is_better: bool = True,
+        show_marker: bool = True,
+        scale_max: float = 1.0,
+        size: tuple[float, float] = (260, 18),
+    ) -> None:
+        from imgui_bundle import imgui
+
+        scale_max = max(scale_max, value, threshold, 1e-6)
+        width = min(size[0], max(120.0, imgui.get_content_region_avail().x - 8.0))
+        height = size[1]
+        origin = imgui.get_cursor_screen_pos()
+        draw_list = imgui.get_window_draw_list()
+        bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.12, 0.11, 0.15, 1.0))
+        ok = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.28, 0.78, 0.38, 1.0))
+        bad = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.92, 0.35, 0.26, 1.0))
+        marker = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 0.92, 0.35, 1.0))
+        text = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.92, 0.92, 0.96, 1.0))
+        passes = value >= threshold if higher_is_better else value <= threshold
+        fill_width = width * min(max(value / scale_max, 0.0), 1.0)
+        draw_list.add_rect_filled(
+            origin, imgui.ImVec2(origin.x + width, origin.y + height), bg, 3.0
+        )
+        draw_list.add_rect_filled(
+            origin,
+            imgui.ImVec2(origin.x + fill_width, origin.y + height),
+            ok if passes else bad,
+            3.0,
+        )
+        if show_marker:
+            marker_x = origin.x + width * min(max(threshold / scale_max, 0.0), 1.0)
+            draw_list.add_line(
+                imgui.ImVec2(marker_x, origin.y - 2.0),
+                imgui.ImVec2(marker_x, origin.y + height + 2.0),
+                marker,
+                2.0,
+            )
+        draw_list.add_text(
+            imgui.ImVec2(origin.x + 5.0, origin.y + 1.0),
+            text,
+            f"{label}: {value:.2f}",
+        )
+        imgui.dummy(imgui.ImVec2(width, height + 4.0))
+
+    def _draw_event_log(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text("Recent Events")
+        entries = list(self.controller.ui_log)[-6:]
+        if not entries:
+            imgui.text_disabled("(none)")
+            return
+        for entry in entries:
+            imgui.text_unformatted(entry.format())
+
     def _hold_button(
         self,
         label: str,
@@ -508,11 +691,13 @@ class DesktopVoiceUi:
         except ValueError as exc:
             if mode == "recognize" or mode == "test":
                 self.controller.pulse_fizzle()
+                self.controller.add_log(f"Voice fizzle: {exc}")
             self.controller.status = str(exc)
         except Exception as exc:
             LOGGER.exception("Recording action failed")
             if mode == "recognize" or mode == "test":
                 self.controller.pulse_fizzle()
+                self.controller.add_log(f"Voice fizzle: {exc}")
             self.controller.status = str(exc)
 
     def _handle_recording(self, mode: str, audio: FloatArray) -> None:
@@ -556,6 +741,19 @@ class DesktopVoiceUi:
             self.recorder_error = f"Audio recorder failed: {exc}"
             self.recorder = None
             return None
+
+    def _log_status_changes(self) -> None:
+        input_status = self.controller.input_status
+        if input_status is not None and input_status != self._last_logged_input_status:
+            self.controller.add_log(input_status)
+            self._last_logged_input_status = input_status
+        output_status = self.controller.output_status
+        if (
+            output_status is not None
+            and output_status != self._last_logged_output_status
+        ):
+            self.controller.add_log(output_status)
+            self._last_logged_output_status = output_status
 
     def _selected_spell(self) -> Spell | None:
         if self.selected_spell_id is None:
@@ -663,6 +861,15 @@ class DesktopVoiceUi:
 
         imgui.separator()
         imgui.text(label)
+        self._draw_gesture_canvas(points, size=size)
+
+    def _draw_gesture_canvas(
+        self,
+        points: FloatArray | None,
+        size: tuple[float, float] = (260, 150),
+    ) -> None:
+        from imgui_bundle import imgui
+
         draw_size = imgui.ImVec2(size[0], size[1])
         origin = imgui.get_cursor_screen_pos()
         draw_list = imgui.get_window_draw_list()
@@ -845,6 +1052,15 @@ def _map_gesture_points_to_rect(points: np.ndarray, origin, size) -> list:
         imgui.ImVec2(float(center[0] + point[0]), float(center[1] - point[1]))
         for point in mapped
     ]
+
+
+def _gesture_margin(ranking: tuple[GestureRanking, ...]) -> float | None:
+    if len(ranking) < 2:
+        return None
+    second = ranking[1]
+    if second.distance <= 1e-6:
+        return 0.0
+    return float((second.distance - ranking[0].distance) / second.distance)
 
 
 if __name__ == "__main__":
