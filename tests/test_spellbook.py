@@ -39,6 +39,19 @@ def test_create_save_load_round_trip(tmp_path: Path) -> None:
     assert s.voice_samples == (f"samples/spell_{spell.id}/voice_001.wav",)
 
 
+def test_load_corrupt_spellbook_backs_up_and_starts_empty(tmp_path: Path) -> None:
+    path = tmp_path / "spellbook.json"
+    path.write_text("{", encoding="utf-8")
+
+    book = load_spellbook(tmp_path)
+
+    assert book.spells == ()
+    assert not path.exists()
+    backups = list(tmp_path.glob("spellbook.json.corrupt-*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{"
+
+
 def test_find_spell_is_case_insensitive(tmp_path: Path) -> None:
     book = load_spellbook(tmp_path)
     book, _ = create_spell(book, "Lumos")

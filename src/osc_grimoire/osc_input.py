@@ -77,6 +77,15 @@ class OscInputService:
             return
         if self._osc_server is not None:
             return
+        try:
+            self._start()
+        except Exception:
+            LOGGER.exception("OSC input startup failed; continuing without OSC input.")
+            self.stop()
+            self.status_text = "OSC input: unavailable"
+
+    def _start(self) -> None:
+        assert self._osc_server is None
 
         ports = _resolve_input_ports(self.config)
         dispatcher = Dispatcher()

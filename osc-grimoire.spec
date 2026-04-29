@@ -29,6 +29,7 @@ hiddenimports += collect_submodules("osc_grimoire")
 model_dir = Path("vendor/models/parakeet-ctc-110m-int8")
 if model_dir.exists():
     datas.append((str(model_dir), "models/parakeet-ctc-110m-int8"))
+datas.append(("src/osc_grimoire/assets", "osc_grimoire/assets"))
 datas.append(("THIRD_PARTY_NOTICES.txt", "."))
 
 

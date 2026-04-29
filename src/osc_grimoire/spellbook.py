@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from .paths import spell_samples_dir, spellbook_path
@@ -38,7 +39,16 @@ def load_spellbook(data_dir: Path) -> Spellbook:
         LOGGER.info("No spellbook at %s; starting empty.", path)
         return Spellbook(data_dir=data_dir)
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        backup_path = _backup_corrupt_spellbook(path)
+        LOGGER.exception(
+            "Could not parse spellbook at %s; moved it to %s and starting empty.",
+            path,
+            backup_path,
+        )
+        return Spellbook(data_dir=data_dir)
     version = raw.get("version")
     if version != SCHEMA_VERSION:
         raise ValueError(
@@ -56,8 +66,21 @@ def save_spellbook(spellbook: Spellbook) -> None:
         "version": SCHEMA_VERSION,
         "spells": [_spell_to_json(s) for s in spellbook.spells],
     }
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f"{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp_path.replace(path)
     LOGGER.debug("Saved %d spell(s) to %s", len(spellbook.spells), path)
+
+
+def _backup_corrupt_spellbook(path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = path.with_name(f"{path.name}.corrupt-{timestamp}.bak")
+    suffix = 2
+    while backup_path.exists():
+        backup_path = path.with_name(f"{path.name}.corrupt-{timestamp}-{suffix}.bak")
+        suffix += 1
+    path.replace(backup_path)
+    return backup_path
 
 
 def find_spell_by_name(spellbook: Spellbook, name: str) -> Spell | None:

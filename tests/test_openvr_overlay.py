@@ -157,6 +157,7 @@ def test_action_manifest_includes_left_and_right_casting_actions() -> None:
     assert "/actions/main/in/right_pose" in payload
     assert "/actions/main/in/left_pose" in payload
     assert "/actions/main/in/ui_toggle" in payload
+    assert "bindings_oculus_touch.json" in payload
 
 
 def test_knuckles_binding_chords_b_buttons_for_ui_toggle() -> None:
@@ -176,6 +177,29 @@ def test_knuckles_binding_chords_b_buttons_for_ui_toggle() -> None:
         ],
         "output": "/actions/main/in/ui_toggle",
     } in chords
+
+
+def test_oculus_touch_binding_chords_menu_buttons_for_ui_toggle() -> None:
+    import json
+
+    payload = json.loads(
+        (action_manifest_path().parent / "bindings_oculus_touch.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    main_bindings = payload["bindings"]["/actions/main"]
+
+    assert {
+        "output": "/actions/main/in/right_pose",
+        "path": "/user/hand/right/pose/tip",
+    } in main_bindings["poses"]
+    assert {
+        "inputs": [
+            ["/user/hand/left/input/y", "single"],
+            ["/user/hand/right/input/b", "single"],
+        ],
+        "output": "/actions/main/in/ui_toggle",
+    } in main_bindings["chords"]
 
 
 def test_runner_tolerates_missing_pose_array(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -522,6 +546,70 @@ def test_runner_ui_toggle_action_flips_controller_visibility(
     assert app.controller.ui_toggle_count == 1
 
 
+def test_runner_tolerates_openvr_input_no_data() -> None:
+    from imgui_bundle import imgui
+
+    imgui.create_context()
+    app = _FakeApp()
+    try:
+        runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+        runner.openvr = _FakeOpenVr()
+        runner.vr_input = _NoDataVrInput()
+        runner.vr_system = _FakeSystem()
+        runner.vr_overlay = _FakeOverlay()
+        runner.overlay_handle = 123
+        runner.action_handles = OpenVrActionHandles(
+            action_set=10,
+            ui_toggle=9,
+            right_trigger=11,
+            right_grip=12,
+            right_pose=13,
+            right_source=14,
+            left_trigger=21,
+            left_grip=22,
+            left_pose=23,
+            left_source=24,
+        )
+        runner.trigger_down = True
+
+        runner._inject_controller_input()
+
+        assert app.controller.status == "Waiting for SteamVR input data..."
+        assert runner.trigger_down is False
+    finally:
+        imgui.destroy_context()
+
+
+def test_runner_tolerates_no_data_from_digital_action_read() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_input = _NoDataDigitalVrInput()
+    runner.action_handles = _action_handles()
+
+    assert runner._input_state() is None
+    assert not runner._digital_action_pressed("ui_toggle")
+    assert app.controller.status == "Waiting for SteamVR input data..."
+
+
+def test_runner_tolerates_no_data_from_pose_action_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_input = _NoDataPoseVrInput()
+    runner.vr_system = _FakeSystem()
+    runner.action_handles = _action_handles()
+    monkeypatch.setattr(runner, "_fallback_pointer_pose", lambda: None)
+
+    state = runner._input_state()
+
+    assert state is not None
+    assert state.pose is None
+    assert app.controller.status == "Waiting for SteamVR input data..."
+
+
 class _FakeController:
     status = ""
     config = type("Config", (), {"gesture": GestureRecognitionConfig()})()
@@ -582,6 +670,32 @@ class _FakeKeyboardApp:
 
 
 class _FakeOpenVr:
+    class _ActionSetArrayFactory:
+        def __call__(self):
+            return _FakeOpenVr._ActionSet()
+
+        def __mul__(self, count: int):
+            action_set_type = _FakeOpenVr._ActionSet
+
+            class ActionSetArray(list):
+                def __init__(self) -> None:
+                    super().__init__(action_set_type() for _ in range(count))
+
+            return ActionSetArray
+
+    class _ActionSet:
+        def __init__(self) -> None:
+            self.ulActionSet = 0
+            self.ulRestrictedToDevice = 0
+            self.ulSecondaryActionSet = 0
+            self.nPriority = 0
+
+    class InputError_NoData(Exception):
+        pass
+
+    VRActiveActionSet_t = _ActionSetArrayFactory()
+    k_ulInvalidInputValueHandle = 0
+    k_ulInvalidActionHandle = 0
     k_unTrackedDeviceIndexInvalid = 999
     k_unTrackedDeviceIndex_Hmd = 0
     k_EButton_SteamVR_Trigger = 33
@@ -674,6 +788,40 @@ class _FakeVrInput:
         self.binding_calls.append((app_key, action_set, device_handle, show_on_desktop))
 
 
+class _NoDataVrInput:
+    def updateActionState(self, _sets) -> None:
+        raise _FakeOpenVr.InputError_NoData()
+
+
+class _FakeDigitalActionData:
+    bActive = True
+    bState = False
+    bChanged = False
+
+
+class _NoDataDigitalVrInput:
+    def updateActionState(self, _sets) -> None:
+        pass
+
+    def getDigitalActionData(
+        self, _handle: int, _source: int
+    ) -> _FakeDigitalActionData:
+        raise _FakeOpenVr.InputError_NoData()
+
+
+class _NoDataPoseVrInput:
+    def updateActionState(self, _sets) -> None:
+        pass
+
+    def getDigitalActionData(
+        self, _handle: int, _source: int
+    ) -> _FakeDigitalActionData:
+        return _FakeDigitalActionData()
+
+    def getPoseActionDataForNextFrame(self, *_args) -> None:
+        raise _FakeOpenVr.InputError_NoData()
+
+
 class _FakeTupleOverlay(_FakeOverlay):
     def pollNextOverlayEvent(self, _handle: int, event):
         if not self.events:
@@ -710,4 +858,19 @@ def _matrix(translation: tuple[float, float, float]):
             [0.0, 1.0, 0.0, translation[1]],
             [0.0, 0.0, 1.0, translation[2]],
         ]
+    )
+
+
+def _action_handles() -> OpenVrActionHandles:
+    return OpenVrActionHandles(
+        action_set=10,
+        ui_toggle=9,
+        right_trigger=11,
+        right_grip=12,
+        right_pose=13,
+        right_source=14,
+        left_trigger=21,
+        left_grip=22,
+        left_pose=23,
+        left_source=24,
     )

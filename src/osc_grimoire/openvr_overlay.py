@@ -632,6 +632,11 @@ class OpenVrOverlayRunner:
         assert self.vr_overlay is not None
         assert self.overlay_handle is not None
         input_state = self._input_state()
+        if input_state is None:
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
+            self._cancel_gesture_capture()
+            self.trigger_down = False
+            return
         if self._digital_action_pressed("ui_toggle"):
             self.app.controller.toggle_ui_enabled()
         trigger_pressed = input_state.trigger_down and not self.trigger_down
@@ -773,10 +778,13 @@ class OpenVrOverlayRunner:
             left_source=self.vr_input.getInputSourceHandle("/user/hand/left"),
         )
 
-    def _input_state(self) -> OpenVrInputState:
-        self._update_action_state()
+    def _input_state(self) -> OpenVrInputState | None:
+        if not self._update_action_state():
+            return None
         hand = self.config.pointer_hand
         digital_data = self._digital_action_data(f"{hand}_trigger")
+        if digital_data is None:
+            return None
         return OpenVrInputState(
             trigger_down=bool(digital_data.bActive and digital_data.bState),
             trigger_changed=bool(digital_data.bActive and digital_data.bChanged),
@@ -784,7 +792,7 @@ class OpenVrOverlayRunner:
             pose=self._pose_action(hand),
         )
 
-    def _update_action_state(self) -> None:
+    def _update_action_state(self) -> bool:
         assert self.openvr is not None
         assert self.vr_input is not None
         assert self.action_handles is not None
@@ -795,23 +803,43 @@ class OpenVrOverlayRunner:
         action_set.nPriority = 0
         sets = (self.openvr.VRActiveActionSet_t * 1)()
         sets[0] = action_set
-        self.vr_input.updateActionState(sets)
+        try:
+            self.vr_input.updateActionState(sets)
+        except Exception as exc:
+            if self._is_openvr_input_no_data(exc):
+                self.app.controller.status = "Waiting for SteamVR input data..."
+                return False
+            raise
+        return True
+
+    def _is_openvr_input_no_data(self, exc: Exception) -> bool:
+        assert self.openvr is not None
+        error_class = getattr(self.openvr, "InputError_NoData", None)
+        if error_class is not None and isinstance(exc, error_class):
+            return True
+        return exc.__class__.__name__ == "InputError_NoData"
 
     def _digital_action_state(self, name: str) -> bool:
         data = self._digital_action_data(name)
+        if data is None:
+            return False
         return bool(data.bActive and data.bState)
 
     def _digital_action_changed(self, name: str) -> bool:
         data = self._digital_action_data(name)
+        if data is None:
+            return False
         return bool(data.bActive and data.bChanged)
 
     def _digital_action_pressed(self, name: str) -> bool:
         if self.vr_input is None or self.action_handles is None:
             return False
         data = self._digital_action_data(name)
+        if data is None:
+            return False
         return bool(data.bActive and data.bState and data.bChanged)
 
-    def _digital_action_data(self, name: str) -> Any:
+    def _digital_action_data(self, name: str) -> Any | None:
         assert self.openvr is not None
         assert self.vr_input is not None
         assert self.action_handles is not None
@@ -821,21 +849,33 @@ class OpenVrOverlayRunner:
             if name == "ui_toggle"
             else self._action_source_handle()
         )
-        return self.vr_input.getDigitalActionData(
-            handle,
-            source,
-        )
+        try:
+            return self.vr_input.getDigitalActionData(
+                handle,
+                source,
+            )
+        except Exception as exc:
+            if self._is_openvr_input_no_data(exc):
+                self.app.controller.status = "Waiting for SteamVR input data..."
+                return None
+            raise
 
     def _pose_action(self, hand: str) -> Any | None:
         assert self.openvr is not None
         assert self.vr_input is not None
         assert self.action_handles is not None
         pose_handle = getattr(self.action_handles, f"{hand}_pose")
-        pose_data = self.vr_input.getPoseActionDataForNextFrame(
-            pose_handle,
-            self.openvr.TrackingUniverseStanding,
-            self._action_source_handle(),
-        )
+        try:
+            pose_data = self.vr_input.getPoseActionDataForNextFrame(
+                pose_handle,
+                self.openvr.TrackingUniverseStanding,
+                self._action_source_handle(),
+            )
+        except Exception as exc:
+            if self._is_openvr_input_no_data(exc):
+                self.app.controller.status = "Waiting for SteamVR input data..."
+                return self._fallback_pointer_pose()
+            raise
         if pose_data.bActive and pose_data.pose.bPoseIsValid:
             return pose_data.pose
         return self._fallback_pointer_pose()

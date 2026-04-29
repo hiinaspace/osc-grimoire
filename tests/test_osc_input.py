@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from osc_grimoire.config import OscConfig
 from osc_grimoire.osc_input import (
     OscInputService,
@@ -67,4 +69,18 @@ def test_osc_input_disabled_does_not_start() -> None:
     service.start()
 
     assert service.status_text == "OSC input: disabled"
+    assert service.ports is None
+
+
+def test_osc_input_start_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = OscInputService(OscConfig())
+
+    def fail_start() -> None:
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr(service, "_start", fail_start)
+
+    service.start()
+
+    assert service.status_text == "OSC input: unavailable"
     assert service.ports is None
