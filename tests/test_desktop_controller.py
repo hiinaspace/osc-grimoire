@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
+from osc_grimoire.audio_playback import load_audio_for_playback
 from osc_grimoire.config import (
     AppConfig,
     AudioConfig,
@@ -179,6 +180,30 @@ def test_controller_trims_saved_voice_samples(tmp_path: Path) -> None:
     )
     assert sample_rate == 16000
     assert 0 < saved.size < audio.size
+
+
+def test_load_audio_for_playback_reads_float32_sample(tmp_path: Path) -> None:
+    path = tmp_path / "sample.wav"
+    sf.write(str(path), _audio(440), 16000)
+
+    audio, sample_rate = load_audio_for_playback(path)
+
+    assert sample_rate == 16000
+    assert audio.dtype == np.float32
+    assert audio.size > 0
+
+
+def test_controller_plays_individual_and_random_samples(tmp_path: Path) -> None:
+    player = _FakeAudioPlayer()
+    controller = _controller(tmp_path, audio_player=player)
+    spell = controller.add_sample_to_draft(_audio(440))
+
+    controller.play_sample(spell.voice_samples[0])
+    controller.play_random_sample(spell.id)
+
+    expected_path = tmp_path / spell.voice_samples[0]
+    assert player.paths == [expected_path, expected_path]
+    assert controller.status == f"Playing {spell.name} sample."
 
 
 def test_controller_saves_and_overwrites_gesture_sample(tmp_path: Path) -> None:
@@ -419,7 +444,9 @@ def test_desktop_ui_button_release_does_not_end_overlay_recording(
 
 
 def _controller(
-    data_dir: Path, gesture_config: GestureRecognitionConfig | None = None
+    data_dir: Path,
+    gesture_config: GestureRecognitionConfig | None = None,
+    audio_player: Any | None = None,
 ) -> VoiceTrainingController:
     config = AppConfig(
         audio=AudioConfig(sample_rate=16000),
@@ -430,7 +457,16 @@ def _controller(
         config=config,
         backend=_fake_backend(),
         voice_config=VoiceRecognitionConfig(relative_margin_min=0.0),
+        audio_player=audio_player,
     )
+
+
+class _FakeAudioPlayer:
+    def __init__(self) -> None:
+        self.paths: list[Path] = []
+
+    def play_file(self, path: Path) -> None:
+        self.paths.append(path)
 
 
 class _FakeRecorder:

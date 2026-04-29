@@ -168,7 +168,7 @@ class DesktopVoiceUi:
         )
         if not imgui.begin_table("##spell_summary", 2, table_flags):
             return
-        imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_fixed, 92)
+        imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_fixed, 140)
         imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch)
         for spell in self.controller.spellbook.spells:
             imgui.table_next_row()
@@ -179,6 +179,9 @@ class DesktopVoiceUi:
             )
             if imgui.is_item_clicked():
                 self._open_spell_page(spell)
+            imgui.same_line()
+            if imgui.button("Play"):
+                self._play_random_sample(spell)
             imgui.table_next_column()
             clicked, _selected = imgui.selectable(
                 f"{spell.name}##row",
@@ -444,12 +447,14 @@ class DesktopVoiceUi:
                 imgui.table_next_row()
             imgui.table_next_column()
             imgui.push_id(str(index))
+            if imgui.button("Play"):
+                self._play_sample(relative_path)
+            imgui.same_line()
             if imgui.button("X"):
                 self.controller.delete_sample(spell.id, relative_path)
                 self.waveform_cache.clear()
                 imgui.pop_id()
                 break
-            imgui.same_line()
             if index < len(previews):
                 graph_width = max(110.0, imgui.get_content_region_avail().x - 6.0)
                 imgui.plot_lines(
@@ -461,6 +466,20 @@ class DesktopVoiceUi:
                 )
             imgui.pop_id()
         imgui.end_table()
+
+    def _play_sample(self, relative_path: str) -> None:
+        try:
+            self.controller.play_sample(relative_path)
+        except Exception as exc:
+            LOGGER.exception("Audio playback failed")
+            self.controller.status = f"Playback failed: {exc}"
+
+    def _play_random_sample(self, spell: Spell) -> None:
+        try:
+            self.controller.play_random_sample(spell.id)
+        except Exception as exc:
+            LOGGER.exception("Audio playback failed")
+            self.controller.status = f"Playback failed: {exc}"
 
     def _draw_draft_sample_controls(self) -> None:
         from imgui_bundle import imgui

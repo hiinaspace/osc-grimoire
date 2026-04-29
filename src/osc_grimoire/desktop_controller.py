@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import shutil
 from collections import deque
 from dataclasses import dataclass, replace
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 import numpy as np
 import soundfile as sf
 
+from .audio_playback import AudioPlayer, SoundDeviceAudioPlayer
 from .config import AppConfig, VoiceRecognitionConfig
 from .gesture_recognizer import (
     GestureDecision,
@@ -118,6 +120,7 @@ class VoiceTrainingController:
         voice_config: VoiceRecognitionConfig | None = None,
         output: OutputSink | None = None,
         osc_input: InputSink | None = None,
+        audio_player: AudioPlayer | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.config = config or AppConfig()
@@ -127,6 +130,7 @@ class VoiceTrainingController:
         self.backend = backend or default_voice_backend()
         self.output = output
         self.osc_input = osc_input
+        self.audio_player = audio_player or SoundDeviceAudioPlayer()
         self.spellbook = load_spellbook(data_dir)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
@@ -282,6 +286,19 @@ class VoiceTrainingController:
         fresh = self._spell_or_raise(spell.id)
         self.status = f"Deleted sample from {fresh.name}."
         return fresh
+
+    def play_sample(self, relative_path: str) -> None:
+        path = self.data_dir / relative_path
+        self.audio_player.play_file(path)
+        self.status = "Playing sample."
+
+    def play_random_sample(self, spell_id: str) -> None:
+        spell = self._spell_or_raise(spell_id)
+        if not spell.voice_samples:
+            raise ValueError(f"{spell.name} has no voice samples")
+        relative_path = random.choice(spell.voice_samples)
+        self.audio_player.play_file(self.data_dir / relative_path)
+        self.status = f"Playing {spell.name} sample."
 
     def delete_spell(self, spell_id: str) -> str:
         spell = self._spell_or_raise(spell_id)
