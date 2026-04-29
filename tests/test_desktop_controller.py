@@ -134,6 +134,29 @@ def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
     assert controller.ui_log[-1].message.startswith("Voice fizzle:")
 
 
+def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -> None:
+    osc_input = _FakeInput()
+    controller = _controller(tmp_path)
+    controller.osc_input = osc_input
+
+    assert controller.voice_enabled
+    assert controller.gesture_enabled
+
+    controller.set_voice_enabled(False)
+    controller.set_gesture_enabled(False)
+
+    assert not controller.voice_enabled
+    assert not controller.gesture_enabled
+
+    controller.set_voice_enabled(True)
+    controller.set_gesture_enabled(True)
+    osc_input.voice_enabled = False
+    osc_input.gesture_enabled = False
+
+    assert not controller.voice_enabled
+    assert not controller.gesture_enabled
+
+
 def test_controller_preloads_backend(tmp_path: Path) -> None:
     backend = _CountingBackend()
     controller = VoiceTrainingController(
@@ -506,6 +529,21 @@ class _FakeOutput:
 
     def tick(self, now=None) -> None:
         self.tick_count += 1
+
+
+class _FakeInput:
+    status_text = "OSC input: fake"
+
+    def __init__(self) -> None:
+        self.ui_enabled = True
+        self.gesture_enabled = True
+        self.voice_enabled = True
+
+    def recent_messages(self) -> tuple[Any, ...]:
+        return ()
+
+    def stop(self) -> None:
+        pass
 
 
 def _fake_backend() -> VoiceTemplateBackend:

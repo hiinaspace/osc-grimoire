@@ -110,6 +110,20 @@ class DesktopVoiceUi:
     def _draw_nav(self) -> None:
         from imgui_bundle import imgui
 
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_prop | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##top_bar", 3, table_flags):
+            return
+        imgui.table_setup_column(
+            "Navigation", imgui.TableColumnFlags_.width_stretch, 0.38
+        )
+        imgui.table_setup_column(
+            "Activity", imgui.TableColumnFlags_.width_stretch, 0.24
+        )
+        imgui.table_setup_column("Status", imgui.TableColumnFlags_.width_stretch, 0.38)
+        imgui.table_next_row()
+        imgui.table_next_column()
         if imgui.button("Main"):
             self.page = PAGE_MAIN
             if self.controller.draft is not None:
@@ -126,8 +140,11 @@ class DesktopVoiceUi:
         imgui.same_line()
         if imgui.button("Diagnostics"):
             self.page = PAGE_DIAGNOSTICS
-        imgui.same_line()
+        imgui.table_next_column()
+        self._draw_centered_activity_status()
+        imgui.table_next_column()
         self._draw_top_status()
+        imgui.end_table()
 
     def _draw_main_page(self) -> None:
         from imgui_bundle import imgui
@@ -214,12 +231,21 @@ class DesktopVoiceUi:
             if row is not None:
                 score = _voice_match_score(latest_voice, row)
                 conflict = _voice_margin_conflict(latest_voice, spell.id)
+                state = (
+                    "conflict"
+                    if conflict
+                    else "normal"
+                    if latest_voice.decision.accepted
+                    else "rejected"
+                )
+                if latest_voice.decision.accepted:
+                    state = "accepted" if row == latest_voice.ranking[0] else "muted"
                 self._draw_threshold_bar(
                     score,
                     0.0,
                     label="voice",
                     show_marker=False,
-                    state="conflict" if conflict else "normal",
+                    state=state,
                     size=(260, 14),
                 )
             return
@@ -229,12 +255,25 @@ class DesktopVoiceUi:
                 conflict = _gesture_margin_conflict(
                     latest_gesture, spell.id, self.controller.config.gesture.margin_min
                 )
+                state = (
+                    "conflict"
+                    if conflict
+                    else "normal"
+                    if latest_gesture.decision.accepted
+                    else "rejected"
+                )
+                if latest_gesture.decision.accepted:
+                    state = (
+                        "accepted"
+                        if latest_gesture.decision.best_spell_id == spell.id
+                        else "muted"
+                    )
                 self._draw_threshold_bar(
                     row.score,
                     self.controller.config.gesture.score_min,
                     label="gesture",
                     show_marker=False,
-                    state="conflict" if conflict else "normal",
+                    state=state,
                     size=(260, 14),
                 )
 
@@ -621,12 +660,21 @@ class DesktopVoiceUi:
             return
         for row in result.ranking:
             conflict = _voice_margin_conflict(result, row.spell_id)
+            state = (
+                "conflict"
+                if conflict
+                else "normal"
+                if result.decision.accepted
+                else "rejected"
+            )
+            if result.decision.accepted:
+                state = "accepted" if row == result.ranking[0] else "muted"
             self._draw_threshold_bar(
                 _voice_match_score(result, row),
                 0.0,
                 label=row.name,
                 show_marker=False,
-                state="conflict" if conflict else "normal",
+                state=state,
             )
         if _voice_low_confidence(result):
             imgui.text_disabled(f"Closest spell is weak: {result.ranking[0].name}")
@@ -651,11 +699,24 @@ class DesktopVoiceUi:
             conflict = _gesture_margin_conflict(
                 result, row.spell_id, self.controller.config.gesture.margin_min
             )
+            state = (
+                "conflict"
+                if conflict
+                else "normal"
+                if result.decision.accepted
+                else "rejected"
+            )
+            if result.decision.accepted:
+                state = (
+                    "accepted"
+                    if result.decision.best_spell_id == row.spell_id
+                    else "muted"
+                )
             self._draw_threshold_bar(
                 row.score,
                 self.controller.config.gesture.score_min,
                 label=row.name,
-                state="conflict" if conflict else "normal",
+                state=state,
             )
         if _gesture_margin_failure(result, self.controller.config.gesture.margin_min):
             imgui.text_disabled(
@@ -686,9 +747,15 @@ class DesktopVoiceUi:
         ok_color = imgui.ImVec4(0.28, 0.78, 0.38, 1.0)
         bad_color = imgui.ImVec4(0.92, 0.35, 0.26, 1.0)
         conflict_color = imgui.ImVec4(0.95, 0.68, 0.22, 1.0)
+        accepted_color = imgui.ImVec4(0.22, 0.88, 0.34, 1.0)
+        muted_color = imgui.ImVec4(0.23, 0.32, 0.25, 1.0)
+        rejected_color = imgui.ImVec4(0.38, 0.36, 0.44, 1.0)
         ok = imgui.color_convert_float4_to_u32(ok_color)
         bad = imgui.color_convert_float4_to_u32(bad_color)
         conflict = imgui.color_convert_float4_to_u32(conflict_color)
+        accepted = imgui.color_convert_float4_to_u32(accepted_color)
+        muted = imgui.color_convert_float4_to_u32(muted_color)
+        rejected = imgui.color_convert_float4_to_u32(rejected_color)
         marker = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 0.92, 0.35, 1.0))
         text = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.92, 0.92, 0.96, 1.0))
         passes = value >= threshold if higher_is_better else value <= threshold
@@ -699,7 +766,19 @@ class DesktopVoiceUi:
         draw_list.add_rect_filled(
             origin,
             imgui.ImVec2(origin.x + fill_width, origin.y + height),
-            conflict if state == "conflict" else ok if passes else bad,
+            (
+                accepted
+                if state == "accepted"
+                else muted
+                if state == "muted"
+                else rejected
+                if state == "rejected"
+                else conflict
+                if state == "conflict"
+                else ok
+                if passes
+                else bad
+            ),
             3.0,
         )
         if show_marker:
@@ -730,9 +809,32 @@ class DesktopVoiceUi:
     def _draw_top_status(self) -> None:
         from imgui_bundle import imgui
 
-        imgui.text_disabled(self._activity_status())
+        summary = self._osc_status_summary()
+        width = 56.0 + 72.0 + imgui.calc_text_size(summary).x + 28.0
+        avail = imgui.get_content_region_avail().x
+        if avail > width:
+            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + avail - width)
+        voice_enabled = self.controller.local_voice_enabled
+        changed, voice_enabled = imgui.checkbox("Voice", voice_enabled)
+        if changed:
+            self.controller.set_voice_enabled(voice_enabled)
         imgui.same_line()
-        imgui.text_disabled(self._osc_status_summary())
+        gesture_enabled = self.controller.local_gesture_enabled
+        changed, gesture_enabled = imgui.checkbox("Gesture", gesture_enabled)
+        if changed:
+            self.controller.set_gesture_enabled(gesture_enabled)
+        imgui.same_line()
+        imgui.text_disabled(summary)
+
+    def _draw_centered_activity_status(self) -> None:
+        from imgui_bundle import imgui
+
+        status = self._activity_status()
+        width = imgui.calc_text_size(status).x
+        avail = imgui.get_content_region_avail().x
+        if avail > width:
+            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + (avail - width) * 0.5)
+        imgui.text_disabled(status)
 
     def _hold_button(
         self,
@@ -872,20 +974,11 @@ class DesktopVoiceUi:
         return self.controller.status
 
     def _osc_status_summary(self) -> str:
-        output = (
-            "OSC out: on"
-            if self.controller.output_status is not None
-            else "OSC out: off"
+        enabled = (
+            self.controller.output_status is not None
+            or self.controller.osc_input is not None
         )
-        input_state = "OSC in: off"
-        if self.controller.osc_input is not None:
-            input_state = (
-                "OSC in: "
-                f"UI={'on' if self.controller.ui_enabled else 'off'} "
-                f"G={'on' if self.controller.gesture_enabled else 'off'} "
-                f"V={'on' if self.controller.voice_enabled else 'off'}"
-            )
-        return f"{output} | {input_state}"
+        return f"OSC: {'on' if enabled else 'off'}"
 
     def _selected_spell(self) -> Spell | None:
         if self.selected_spell_id is None:

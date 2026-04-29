@@ -131,6 +131,8 @@ class VoiceTrainingController:
         self.output = output
         self.osc_input = osc_input
         self.audio_player = audio_player or SoundDeviceAudioPlayer()
+        self.local_gesture_enabled = True
+        self.local_voice_enabled = True
         self.spellbook = load_spellbook(data_dir)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
@@ -165,11 +167,25 @@ class VoiceTrainingController:
 
     @property
     def gesture_enabled(self) -> bool:
-        return self.osc_input.gesture_enabled if self.osc_input is not None else True
+        osc_enabled = (
+            self.osc_input.gesture_enabled if self.osc_input is not None else True
+        )
+        return self.local_gesture_enabled and osc_enabled
 
     @property
     def voice_enabled(self) -> bool:
-        return self.osc_input.voice_enabled if self.osc_input is not None else True
+        osc_enabled = (
+            self.osc_input.voice_enabled if self.osc_input is not None else True
+        )
+        return self.local_voice_enabled and osc_enabled
+
+    def set_gesture_enabled(self, enabled: bool) -> None:
+        self.local_gesture_enabled = enabled
+        self.status = f"Gesture input {'enabled' if enabled else 'disabled'}."
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        self.local_voice_enabled = enabled
+        self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
 
     def set_voice_recording(self, recording: bool) -> None:
         if self.output is not None:
