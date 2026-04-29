@@ -388,7 +388,7 @@ class OpenVrOverlayRunner:
             ) from exc
 
     def request_spell_name_keyboard(
-        self, target_spell_id: str | None, initial_name: str
+        self, target_spell_id: str | None, initial_name: str, prompt: str = "Spell name"
     ) -> bool:
         if (
             self.openvr is None
@@ -405,7 +405,7 @@ class OpenVrOverlayRunner:
                 self.openvr.k_EGamepadTextInputModeNormal,
                 self.openvr.k_EGamepadTextInputLineModeSingleLine,
                 flags,
-                "Spell name",
+                prompt,
                 48,
                 initial_name,
                 user_value,

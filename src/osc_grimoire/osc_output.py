@@ -37,6 +37,24 @@ def avatar_parameter_path(parameter_name: str) -> str:
     return f"{AVATAR_PARAMETER_PREFIX}{clean}"
 
 
+def avatar_parameter_name(parameter_name: str) -> str:
+    clean = parameter_name.strip("/")
+    if clean.startswith("avatar/parameters/"):
+        return clean.rsplit("/", 1)[-1]
+    return clean
+
+
+def spell_osc_parameter_name(spell: Spell, config: OscConfig) -> str:
+    if spell.osc_address and spell.osc_address.strip():
+        return avatar_parameter_name(spell.osc_address)
+    suffix = safe_spell_parameter_suffix(spell.name, spell.id)
+    return f"{config.parameter_prefix}Spell{suffix}"
+
+
+def fizzle_osc_parameter_name(config: OscConfig) -> str:
+    return f"{config.parameter_prefix}Fizzle"
+
+
 def discover_osc_target(config: OscConfig) -> OscTarget:
     try:
         from pythonoscquery.osc_query_browser import OSCQueryBrowser, OSCQueryClient
@@ -167,11 +185,10 @@ class OscOutput:
         self.send_bool(f"{self.config.parameter_prefix}GestureDrawing", drawing)
 
     def pulse_spell(self, spell: Spell) -> None:
-        suffix = safe_spell_parameter_suffix(spell.name, spell.id)
-        self.pulse_bool(f"{self.config.parameter_prefix}Spell{suffix}")
+        self.pulse_bool(spell_osc_parameter_name(spell, self.config))
 
     def pulse_fizzle(self) -> None:
-        self.pulse_bool(f"{self.config.parameter_prefix}Fizzle")
+        self.pulse_bool(fizzle_osc_parameter_name(self.config))
 
     @staticmethod
     def _create_client(target: OscTarget) -> Any:

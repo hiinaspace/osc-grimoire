@@ -9,6 +9,7 @@ from osc_grimoire.osc_output import (
     avatar_parameter_path,
     safe_spell_parameter_suffix,
     select_osc_target_from_services,
+    spell_osc_parameter_name,
 )
 from osc_grimoire.spellbook import Spell
 
@@ -29,6 +30,33 @@ def test_avatar_parameter_path_accepts_names_or_paths() -> None:
     assert (
         avatar_parameter_path("/avatar/parameters/OSCGrimoireFizzle")
         == "/avatar/parameters/OSCGrimoireFizzle"
+    )
+
+
+def test_spell_osc_parameter_uses_override_or_default() -> None:
+    config = OscConfig(parameter_prefix="OSCGrimoire")
+
+    assert (
+        spell_osc_parameter_name(Spell(id="spell-1", name="Lumos!"), config)
+        == "OSCGrimoireSpellLumos"
+    )
+    assert (
+        spell_osc_parameter_name(
+            Spell(id="spell-1", name="Lumos!", osc_address="CustomFire"),
+            config,
+        )
+        == "CustomFire"
+    )
+    assert (
+        spell_osc_parameter_name(
+            Spell(
+                id="spell-1",
+                name="Lumos!",
+                osc_address="/avatar/parameters/CustomFire",
+            ),
+            config,
+        )
+        == "CustomFire"
     )
 
 
@@ -81,7 +109,7 @@ def test_osc_output_sends_recording_pulses_and_resets() -> None:
 
     output.set_voice_recording(True)
     output.set_gesture_drawing(True)
-    output.pulse_spell(Spell(id="spell-1", name="Lumos!"))
+    output.pulse_spell(Spell(id="spell-1", name="Lumos!", osc_address="CustomFire"))
     output.pulse_fizzle()
     clock.value = 0.20
     output.tick()
@@ -89,9 +117,9 @@ def test_osc_output_sends_recording_pulses_and_resets() -> None:
     assert client.messages == [
         ("/avatar/parameters/OSCGrimoireVoiceRecording", True),
         ("/avatar/parameters/OSCGrimoireGestureDrawing", True),
-        ("/avatar/parameters/OSCGrimoireSpellLumos", True),
+        ("/avatar/parameters/CustomFire", True),
         ("/avatar/parameters/OSCGrimoireFizzle", True),
-        ("/avatar/parameters/OSCGrimoireSpellLumos", False),
+        ("/avatar/parameters/CustomFire", False),
         ("/avatar/parameters/OSCGrimoireFizzle", False),
     ]
 

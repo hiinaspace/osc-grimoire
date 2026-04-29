@@ -51,13 +51,20 @@ class DesktopVoiceUi:
         self.recorder: NonBlockingAudioRecorder | None = None
         self.recorder_error: str | None = None
         self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
-        self.keyboard_request_handler: Callable[[str | None, str], bool] | None = None
+        self.keyboard_request_handler: Callable[[str | None, str, str], bool] | None = (
+            None
+        )
         self.keyboard_close_handler: Callable[[], None] | None = None
         self.bindings_request_handler: Callable[[], bool] | None = None
         self.keyboard_edit_spell_id: str | None = None
         self.keyboard_editing = False
         self.keyboard_focus_pending = False
         self.keyboard_original_name = ""
+        self.osc_edit_spell_id: str | None = None
+        self.osc_editing = False
+        self.osc_edit_value = ""
+        self.osc_original_value = ""
+        self.osc_focus_pending = False
         self.pending_spoken_name: str | None = None
         self.pending_spoken_name_spell_id: str | None = None
         self.delete_confirm_spell_id: str | None = None
@@ -158,10 +165,10 @@ class DesktopVoiceUi:
         if not imgui.begin_table("##main_page_folio", 2, table_flags):
             return
         imgui.table_setup_column(
-            "Recognition", imgui.TableColumnFlags_.width_stretch, 0.58
+            "Recognition", imgui.TableColumnFlags_.width_stretch, 0.64
         )
         imgui.table_setup_column(
-            "Visualization", imgui.TableColumnFlags_.width_stretch, 0.42
+            "Visualization", imgui.TableColumnFlags_.width_stretch, 0.36
         )
         imgui.table_next_row()
         imgui.table_next_column()
@@ -195,10 +202,11 @@ class DesktopVoiceUi:
             | imgui.TableFlags_.borders_inner_h
             | imgui.TableFlags_.no_saved_settings
         )
-        if not imgui.begin_table("##spell_summary", 2, table_flags):
+        if not imgui.begin_table("##spell_summary", 3, table_flags):
             return
         imgui.table_setup_column("Gesture", imgui.TableColumnFlags_.width_fixed, 140)
         imgui.table_setup_column("Spell", imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column("OSC", imgui.TableColumnFlags_.width_fixed, 245)
         for spell in self.controller.spellbook.spells:
             imgui.table_next_row()
             imgui.table_next_column()
@@ -215,11 +223,14 @@ class DesktopVoiceUi:
             clicked, _selected = imgui.selectable(
                 f"{spell.name}##row",
                 spell.id == self.selected_spell_id,
-                imgui.SelectableFlags_.span_all_columns,
             )
             if clicked:
                 self._open_spell_page(spell)
             self._draw_spell_row_match(spell)
+            imgui.table_next_column()
+            imgui.text_disabled(
+                f"osc: {_shorten_ui_text(self.controller.spell_osc_parameter_name(spell), 36)}"
+            )
             imgui.pop_id()
         imgui.table_next_row()
         imgui.table_next_column()
@@ -233,6 +244,7 @@ class DesktopVoiceUi:
             imgui.end_disabled()
         elif imgui.button("Add Spell"):
             self._start_add_spell()
+        imgui.table_next_column()
         imgui.end_table()
 
     def _draw_spell_row_match(self, spell: Spell) -> None:
@@ -368,6 +380,8 @@ class DesktopVoiceUi:
             imgui.ImVec2(360, 0),
             f"{sample_count}/{DEFAULT_SAMPLE_TARGET} samples",
         )
+        if spell is not None:
+            self._draw_spell_osc_controls(spell)
 
     def _draw_overlay_rename_controls(self, spell: Spell | None) -> None:
         from imgui_bundle import imgui
@@ -427,7 +441,7 @@ class DesktopVoiceUi:
         if self.keyboard_request_handler is None:
             self.controller.status = "SteamVR keyboard is unavailable."
             return
-        if self.keyboard_request_handler(target_spell_id, self.edit_name):
+        if self.keyboard_request_handler(target_spell_id, self.edit_name, "Spell name"):
             self.keyboard_edit_spell_id = target_spell_id
             self.keyboard_editing = True
             self.keyboard_focus_pending = True
@@ -474,6 +488,72 @@ class DesktopVoiceUi:
         spell = self.controller.rename_spell(target_spell_id, clean_name)
         self.selected_spell_id = spell.id
         self.edit_name = spell.name
+
+    def _draw_spell_osc_controls(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text(f"OSC parameter: {self.controller.spell_osc_parameter_name(spell)}")
+        if self.osc_editing and self.osc_edit_spell_id == spell.id:
+            if self.osc_focus_pending:
+                imgui.set_keyboard_focus_here()
+                self.osc_focus_pending = False
+            _changed, value = imgui.input_text("OSC parameter", self.osc_edit_value)
+            self.osc_edit_value = value
+            if imgui.button("Save OSC"):
+                self._finish_osc_edit(commit=True)
+            imgui.same_line()
+            if imgui.button("Cancel OSC"):
+                self._finish_osc_edit(commit=False)
+            imgui.same_line()
+            if imgui.button("Show Keyboard"):
+                self._request_osc_keyboard(spell)
+            imgui.same_line()
+            if imgui.button("Use Default"):
+                self.osc_edit_value = ""
+                self._finish_osc_edit(commit=True)
+            imgui.text_disabled(
+                "Leave blank to use the default derived from the spell name."
+            )
+            return
+        if imgui.button("Edit OSC"):
+            self.osc_edit_spell_id = spell.id
+            self.osc_editing = True
+            self.osc_edit_value = (
+                spell.osc_address or self.controller.spell_osc_parameter_name(spell)
+            )
+            self.osc_original_value = spell.osc_address or ""
+            self.osc_focus_pending = True
+
+    def _request_osc_keyboard(self, spell: Spell) -> None:
+        if self.keyboard_request_handler is None:
+            self.controller.status = "SteamVR keyboard is unavailable."
+            return
+        if self.keyboard_request_handler(
+            spell.id, self.osc_edit_value, "OSC parameter"
+        ):
+            self.osc_focus_pending = True
+            self.controller.status = "SteamVR keyboard opened."
+        else:
+            self.controller.status = "Could not open SteamVR keyboard."
+
+    def _finish_osc_edit(self, *, commit: bool) -> None:
+        spell_id = self.osc_edit_spell_id
+        if self.keyboard_close_handler is not None:
+            self.keyboard_close_handler()
+        self.osc_editing = False
+        self.osc_edit_spell_id = None
+        self.osc_focus_pending = False
+        if spell_id is None:
+            return
+        if not commit:
+            self.osc_edit_value = self.osc_original_value
+            self.osc_original_value = ""
+            self.controller.status = "OSC parameter edit cancelled."
+            return
+        spell = self.controller.update_spell_osc_address(spell_id, self.osc_edit_value)
+        self.selected_spell_id = spell.id
+        self.osc_original_value = ""
 
     def _draw_samples(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -695,6 +775,22 @@ class DesktopVoiceUi:
             self.controller.gesture_strictness,
             self.controller.set_gesture_strictness,
         )
+
+        imgui.separator()
+        imgui.text("OSC")
+        prefix = self.controller.config.osc.parameter_prefix
+        imgui.text_disabled("Outputs sent to VRChat:")
+        imgui.bullet_text(f"{prefix}VoiceRecording: true while voice is recording.")
+        imgui.bullet_text(f"{prefix}GestureDrawing: true while gesture is drawing.")
+        imgui.bullet_text(f"{prefix}Fizzle: brief pulse when recognition rejects.")
+        imgui.bullet_text(
+            f"{prefix}Spell<Name>: brief pulse when a spell is accepted; "
+            "customizable on each spell page."
+        )
+        imgui.text_disabled("Inputs accepted from VRChat:")
+        imgui.bullet_text(f"{prefix}UIEnabled: show or hide the spellbook.")
+        imgui.bullet_text(f"{prefix}GestureEnabled: enable or disable gesture input.")
+        imgui.bullet_text(f"{prefix}VoiceEnabled: enable or disable voice input.")
 
         imgui.separator()
         if imgui.collapsing_header("Diagnostics"):
@@ -1412,6 +1508,14 @@ def _voice_margin_conflict(result: RecognitionResult, spell_id: str) -> bool:
     if not _voice_margin_failure(result):
         return False
     return any(row.spell_id == spell_id for row in result.ranking[:2])
+
+
+def _shorten_ui_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return f"...{text[-(max_chars - 3) :]}"
 
 
 if __name__ == "__main__":

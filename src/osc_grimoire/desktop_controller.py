@@ -21,6 +21,7 @@ from .gesture_recognizer import (
     recognize_gesture,
     save_gesture_points,
 )
+from .osc_output import fizzle_osc_parameter_name, spell_osc_parameter_name
 from .paths import spell_samples_dir
 from .spellbook import (
     Spell,
@@ -331,6 +332,20 @@ class VoiceTrainingController:
         self.status = f"Renamed spell to {updated.name}."
         return updated
 
+    def update_spell_osc_address(self, spell_id: str, value: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        updated = replace(spell, osc_address=value.strip() or None)
+        self.spellbook = replace_spell(self.spellbook, updated)
+        save_spellbook(self.spellbook)
+        self.status = f"OSC parameter set to {self.spell_osc_parameter_name(updated)}."
+        return updated
+
+    def spell_osc_parameter_name(self, spell: Spell) -> str:
+        return spell_osc_parameter_name(spell, self.config.osc)
+
+    def fizzle_osc_parameter_name(self) -> str:
+        return fizzle_osc_parameter_name(self.config.osc)
+
     def suggest_spell_name(self, audio: FloatArray) -> str:
         if audio.size == 0:
             raise ValueError("No audio captured")
@@ -478,7 +493,9 @@ class VoiceTrainingController:
             self.last_gesture_result = result
             self.last_match_kind = "gesture"
             self.status = "Gesture rejected."
-            self.add_log("Gesture rejected: gesture too short")
+            self.add_log(
+                f"Fizzle (osc: {self.fizzle_osc_parameter_name()}): gesture too short"
+            )
             self._emit_gesture_result(result)
             return result
         templates = load_gesture_templates(self.spellbook, self.config.gesture)
@@ -495,9 +512,14 @@ class VoiceTrainingController:
         )
         if result.decision.accepted and result.decision.best_spell_id is not None:
             spell = self._spell_or_raise(result.decision.best_spell_id)
-            self.add_log(f"Gesture cast: {spell.name}")
+            self.add_log(
+                f"Accepted: {spell.name} (osc: {self.spell_osc_parameter_name(spell)})"
+            )
         else:
-            self.add_log(f"Gesture fizzle: {result.decision.reason}")
+            self.add_log(
+                f"Fizzle (osc: {self.fizzle_osc_parameter_name()}): "
+                f"{result.decision.reason}"
+            )
         self._emit_gesture_result(result)
         return result
 
@@ -528,9 +550,16 @@ class VoiceTrainingController:
         self.last_match_kind = "voice"
         self.status = "Accepted." if decision.accepted else "Rejected."
         if decision.accepted and ranking:
-            self.add_log(f"Voice cast: {ranking[0].name}")
+            spell = self._spell_or_raise(ranking[0].spell_id)
+            self.add_log(
+                f"Accepted: {ranking[0].name} "
+                f"(osc: {self.spell_osc_parameter_name(spell)})"
+            )
         else:
-            self.add_log(f"Voice fizzle: {_voice_decision_summary(ranking, decision)}")
+            self.add_log(
+                f"Fizzle (osc: {self.fizzle_osc_parameter_name()}): "
+                f"{_voice_decision_summary(ranking, decision)}"
+            )
         self._emit_recognition_result(result)
         return result
 

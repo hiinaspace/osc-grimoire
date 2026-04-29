@@ -124,6 +124,22 @@ def test_controller_renames_spell_and_keeps_names_unique(tmp_path: Path) -> None
     assert renamed.name == f"{first.name} 2"
 
 
+def test_controller_updates_spell_osc_parameter(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+
+    updated = controller.update_spell_osc_address(spell.id, "CustomFire")
+
+    assert updated.osc_address == "CustomFire"
+    assert controller.spell_osc_parameter_name(updated) == "CustomFire"
+    assert load_spellbook(tmp_path).spells[0].osc_address == "CustomFire"
+
+    reset = controller.update_spell_osc_address(spell.id, "")
+
+    assert reset.osc_address is None
+    assert controller.spell_osc_parameter_name(reset).startswith("OSCGrimoireSpell")
+
+
 def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.start_draft()
@@ -152,7 +168,7 @@ def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
 
     assert output.spell_pulses == ["Low"]
     assert output.fizzle_count == 0
-    assert controller.ui_log[-1].message == "Voice cast: Low"
+    assert controller.ui_log[-1].message == "Accepted: Low (osc: OSCGrimoireSpellLow)"
 
 
 def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
@@ -164,7 +180,7 @@ def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
 
     assert output.spell_pulses == []
     assert output.fizzle_count == 1
-    assert controller.ui_log[-1].message.startswith("Voice fizzle:")
+    assert controller.ui_log[-1].message.startswith("Fizzle (osc: OSCGrimoireFizzle):")
 
 
 def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -> None:
@@ -374,7 +390,10 @@ def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
 
     assert output.spell_pulses == [spell.name]
     assert output.fizzle_count == 1
-    assert controller.ui_log[-1].message == "Gesture rejected: gesture too short"
+    assert (
+        controller.ui_log[-1].message
+        == "Fizzle (osc: OSCGrimoireFizzle): gesture too short"
+    )
 
 
 def test_controller_rejects_short_gesture_without_mutation(tmp_path: Path) -> None:
@@ -487,6 +506,21 @@ def test_desktop_ui_overlay_keyboard_cancel_restores_name(tmp_path: Path) -> Non
     assert controller.spellbook.spells[0].name == spell.name
     assert ui.edit_name == spell.name
     assert close_count == 1
+
+
+def test_desktop_ui_osc_edit_updates_spell_parameter(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    ui.osc_editing = True
+    ui.osc_edit_spell_id = spell.id
+    ui.osc_edit_value = "CustomFire"
+
+    ui._finish_osc_edit(commit=True)
+
+    assert controller.spellbook.spells[0].osc_address == "CustomFire"
 
 
 def test_desktop_ui_spoken_name_requires_confirmation(
