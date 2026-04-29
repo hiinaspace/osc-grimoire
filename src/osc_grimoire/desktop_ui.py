@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
@@ -58,6 +59,10 @@ class DesktopVoiceUi:
         self.keyboard_original_name = ""
         self.pending_spoken_name: str | None = None
         self.pending_spoken_name_spell_id: str | None = None
+        self.delete_confirm_spell_id: str | None = None
+        self.delete_confirm_ready_at = 0.0
+        self.delete_confirm_expires_at = 0.0
+        self.suppress_add_spell_until_mouse_up = False
         self._last_logged_input_status: str | None = None
         self._last_logged_output_status: str | None = None
         self._implot_context_created = False
@@ -95,11 +100,7 @@ class DesktopVoiceUi:
         else:
             self._draw_spell_page()
         imgui.separator()
-        imgui.text(self.controller.status)
-        if self.controller.output_status is not None:
-            imgui.text(self.controller.output_status)
-        if self.controller.input_status is not None:
-            imgui.text(self.controller.input_status)
+        self._draw_bottom_log()
         if self.recorder_error:
             imgui.text_colored(imgui.ImVec4(1.0, 0.35, 0.25, 1.0), self.recorder_error)
         imgui.end()
@@ -113,6 +114,7 @@ class DesktopVoiceUi:
             self.page = PAGE_MAIN
             if self.controller.draft is not None:
                 self.controller.cancel_draft()
+                self.suppress_add_spell_until_mouse_up = True
         imgui.same_line()
         if imgui.button("Prev"):
             self._go_prev_page()
@@ -122,14 +124,10 @@ class DesktopVoiceUi:
         imgui.same_line()
         imgui.text(f"Page: {self._page_title()}")
         imgui.same_line()
-        if imgui.button("Add Spell"):
-            self.controller.start_draft()
-            self.selected_spell_id = None
-            self.edit_name = self.controller.draft.name if self.controller.draft else ""
-            self.page = len(self.controller.spellbook.spells) + 1
-        imgui.same_line()
         if imgui.button("Diagnostics"):
             self.page = PAGE_DIAGNOSTICS
+        imgui.same_line()
+        self._draw_top_status()
 
     def _draw_main_page(self) -> None:
         from imgui_bundle import imgui
@@ -151,15 +149,6 @@ class DesktopVoiceUi:
         imgui.table_next_column()
         imgui.text("Spells")
         self._draw_spell_summary_table()
-        imgui.separator()
-        self._hold_button(
-            "Hold to Recognize" if self.overlay_mode else "Hold to Recognize (Space)",
-            "recognize",
-            allow_space=not self.overlay_mode,
-        )
-
-        imgui.separator()
-        self._draw_event_log()
         imgui.table_next_column()
         self._draw_latest_score_panel()
         if self.controller.latest_gesture_points is not None:
@@ -200,6 +189,18 @@ class DesktopVoiceUi:
                 self._open_spell_page(spell)
             self._draw_spell_row_match(spell)
             imgui.pop_id()
+        imgui.table_next_row()
+        imgui.table_next_column()
+        imgui.text_disabled("+")
+        imgui.table_next_column()
+        if self.suppress_add_spell_until_mouse_up:
+            if not imgui.is_mouse_down(imgui.MouseButton_.left):
+                self.suppress_add_spell_until_mouse_up = False
+            imgui.begin_disabled()
+            imgui.button("Add Spell")
+            imgui.end_disabled()
+        elif imgui.button("Add Spell"):
+            self._start_add_spell()
         imgui.end_table()
 
     def _draw_spell_row_match(self, spell: Spell) -> None:
@@ -239,9 +240,8 @@ class DesktopVoiceUi:
 
         spell = self._selected_spell()
         if spell is None and self.controller.draft is None:
-            self.controller.start_draft()
-            assert self.controller.draft is not None
-            self.edit_name = self.controller.draft.name
+            self.page = PAGE_MAIN
+            return
 
         if spell is not None and not self.edit_name:
             self.edit_name = spell.name
@@ -261,11 +261,11 @@ class DesktopVoiceUi:
         spell = self._selected_spell()
         if spell is not None:
             self._draw_samples(spell)
+        elif self.controller.draft is not None:
+            self._draw_draft_sample_controls()
         imgui.table_next_column()
         if spell is not None:
-            self._draw_gesture_preview(
-                "Saved Gesture", self.controller.gesture_preview(spell)
-            )
+            self._draw_saved_gesture_section(spell)
         if self.controller.latest_gesture_points is not None:
             self._draw_gesture_preview(
                 "Latest Gesture", self.controller.latest_gesture_points
@@ -297,11 +297,13 @@ class DesktopVoiceUi:
                 self.selected_spell_id = None
                 self.edit_name = ""
                 self.page = PAGE_MAIN
+                self.suppress_add_spell_until_mouse_up = True
         else:
             if self._can_edit_spell_names() and imgui.button("Save Name"):
                 spell = self.controller.rename_spell(spell.id, self.edit_name)
                 self.selected_spell_id = spell.id
                 self.edit_name = spell.name
+            self._draw_delete_spell_controls(spell)
 
         spell = self._selected_spell()
         sample_count = len(spell.voice_samples) if spell is not None else 0
@@ -310,19 +312,6 @@ class DesktopVoiceUi:
             imgui.ImVec2(360, 0),
             f"{sample_count}/{DEFAULT_SAMPLE_TARGET} samples",
         )
-
-        self._hold_button(
-            "Hold to Record Sample"
-            if self.overlay_mode
-            else "Hold to Record Sample (Space)",
-            "sample",
-            allow_space=not self.overlay_mode,
-        )
-        imgui.same_line()
-        self._hold_button("Hold to Test", "test", allow_space=False)
-        if spell is not None:
-            if imgui.button("Record / Replace Gesture", imgui.ImVec2(230, 42)):
-                self.controller.arm_gesture_recording(spell.id)
 
     def _draw_overlay_rename_controls(self, spell: Spell | None) -> None:
         from imgui_bundle import imgui
@@ -357,7 +346,8 @@ class DesktopVoiceUi:
                 size=(120, 0),
             )
         else:
-            if imgui.button("Edit Name", imgui.ImVec2(230, 42)):
+            imgui.same_line()
+            if imgui.button("Edit"):
                 self._request_keyboard_rename(target_spell_id)
         if (
             self.pending_spoken_name is None
@@ -434,6 +424,13 @@ class DesktopVoiceUi:
 
         imgui.separator()
         imgui.text("Samples")
+        imgui.same_line()
+        self._hold_button(
+            "Record Sample" if self.overlay_mode else "Record Sample (Space)",
+            "sample",
+            allow_space=not self.overlay_mode,
+            size=(150, 0),
+        )
         previews = self._sample_previews(spell)
         available_width = imgui.get_content_region_avail().x
         columns = max(1, min(3, int(available_width // 190)))
@@ -465,6 +462,78 @@ class DesktopVoiceUi:
             imgui.pop_id()
         imgui.end_table()
 
+    def _draw_draft_sample_controls(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text("Samples")
+        imgui.same_line()
+        self._hold_button(
+            "Record First Sample"
+            if self.overlay_mode
+            else "Record First Sample (Space)",
+            "sample",
+            allow_space=not self.overlay_mode,
+            size=(190, 0),
+        )
+        imgui.text_disabled("Recording a sample creates the spell.")
+
+    def _draw_saved_gesture_section(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text("Saved Gesture")
+        imgui.same_line()
+        if imgui.button("Record Gesture"):
+            self.controller.arm_gesture_recording(spell.id)
+        imgui.same_line()
+        if imgui.button("Clear Gesture"):
+            self.controller.clear_gesture_sample(spell.id)
+        self._draw_gesture_canvas(self.controller.gesture_preview(spell))
+
+    def _draw_delete_spell_controls(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        now = time.monotonic()
+        if (
+            self.delete_confirm_spell_id != spell.id
+            or now > self.delete_confirm_expires_at
+        ):
+            if imgui.button("Delete Spell"):
+                self.delete_confirm_spell_id = spell.id
+                self.delete_confirm_ready_at = now + 1.5
+                self.delete_confirm_expires_at = now + 7.0
+                self.controller.status = "Delete armed. Wait, then confirm."
+            return
+
+        remaining = max(0.0, self.delete_confirm_ready_at - now)
+        if remaining > 0.0:
+            imgui.text_colored(
+                imgui.ImVec4(1.0, 0.72, 0.25, 1.0),
+                f"Confirm delete in {remaining:.1f}s",
+            )
+            return
+
+        imgui.text_colored(
+            imgui.ImVec4(1.0, 0.45, 0.35, 1.0),
+            f"Delete {spell.name}?",
+        )
+        if imgui.button("Confirm Delete"):
+            self.controller.delete_spell(spell.id)
+            self.delete_confirm_spell_id = None
+            self.selected_spell_id = (
+                self.controller.spellbook.spells[0].id
+                if self.controller.spellbook.spells
+                else None
+            )
+            self.edit_name = ""
+            self.page = PAGE_MAIN
+            self.waveform_cache.clear()
+        imgui.same_line()
+        if imgui.button("Cancel Delete"):
+            self.delete_confirm_spell_id = None
+            self.controller.status = "Delete cancelled."
+
     def _can_edit_spell_names(self) -> bool:
         return not self.overlay_mode
 
@@ -491,6 +560,10 @@ class DesktopVoiceUi:
             "relative_margin_min: "
             f"{self.controller.voice_config.relative_margin_min:.2f}"
         )
+        if self.controller.output_status is not None:
+            imgui.text(self.controller.output_status)
+        if self.controller.input_status is not None:
+            imgui.text(self.controller.input_status)
         imgui.separator()
         imgui.text("Last recognition")
         result = self.controller.last_result
@@ -625,16 +698,22 @@ class DesktopVoiceUi:
         )
         imgui.dummy(imgui.ImVec2(width, height + 4.0))
 
-    def _draw_event_log(self) -> None:
+    def _draw_bottom_log(self) -> None:
         from imgui_bundle import imgui
 
-        imgui.text("Recent Events")
-        entries = list(self.controller.ui_log)[-6:]
+        entries = list(self.controller.ui_log)[-4:]
         if not entries:
-            imgui.text_disabled("(none)")
+            imgui.text_disabled("(no recent events)")
             return
         for entry in entries:
             imgui.text_unformatted(entry.format())
+
+    def _draw_top_status(self) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text_disabled(self._activity_status())
+        imgui.same_line()
+        imgui.text_disabled(self._osc_status_summary())
 
     def _hold_button(
         self,
@@ -745,17 +824,49 @@ class DesktopVoiceUi:
             return None
 
     def _log_status_changes(self) -> None:
+        changed = False
         input_status = self.controller.input_status
         if input_status is not None and input_status != self._last_logged_input_status:
-            self.controller.add_log(input_status)
             self._last_logged_input_status = input_status
+            changed = True
         output_status = self.controller.output_status
         if (
             output_status is not None
             and output_status != self._last_logged_output_status
         ):
-            self.controller.add_log(output_status)
             self._last_logged_output_status = output_status
+            changed = True
+        if changed:
+            self.controller.add_log(self._osc_status_summary())
+
+    def _activity_status(self) -> str:
+        if self.recording_mode is not None:
+            if self.recording_mode == "recognize":
+                return "voice: recording"
+            if self.recording_mode == "sample":
+                return "sample: recording"
+            if self.recording_mode == "name":
+                return "name: recording"
+            return f"{self.recording_mode}: recording"
+        if self.controller.armed_gesture_spell_id is not None:
+            return "gesture: armed"
+        return self.controller.status
+
+    def _osc_status_summary(self) -> str:
+        output = (
+            "OSC out: on"
+            if self.controller.output_status is not None
+            else "OSC out: off"
+        )
+        input_state = "OSC in: off"
+        if self.controller.osc_input is not None:
+            input_state = (
+                "OSC in: "
+                f"UI={'on' if self.controller.ui_enabled else 'off'} "
+                f"G={'on' if self.controller.gesture_enabled else 'off'} "
+                f"V={'on' if self.controller.voice_enabled else 'off'}"
+            )
+        return f"{output} | {input_state}"
 
     def _selected_spell(self) -> Spell | None:
         if self.selected_spell_id is None:
@@ -770,6 +881,12 @@ class DesktopVoiceUi:
         self.selected_spell_id = spell.id
         self.edit_name = spell.name
         self.page = self._page_for_spell_id(spell.id)
+
+    def _start_add_spell(self) -> None:
+        self.controller.start_draft()
+        self.selected_spell_id = None
+        self.edit_name = self.controller.draft.name if self.controller.draft else ""
+        self.page = len(self.controller.spellbook.spells) + 1
 
     def _go_prev_page(self) -> None:
         pages = self._ordered_pages()

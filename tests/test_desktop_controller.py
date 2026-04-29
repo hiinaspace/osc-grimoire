@@ -53,6 +53,20 @@ def test_controller_persists_draft_on_first_sample_and_deletes_sample(
     assert not sample_path.exists()
 
 
+def test_controller_deletes_spell_and_sample_directory(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.add_sample_to_draft(_audio(440))
+    sample_path = tmp_path / spell.voice_samples[0]
+    sample_dir = sample_path.parent
+
+    deleted_name = controller.delete_spell(spell.id)
+
+    assert deleted_name == spell.name
+    assert load_spellbook(tmp_path).spells == ()
+    assert not sample_dir.exists()
+    assert controller.ui_log[-1].message == f"Deleted spell: {spell.name}"
+
+
 def test_controller_does_not_persist_draft_on_empty_sample(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.start_draft()
@@ -186,6 +200,24 @@ def test_controller_saves_and_overwrites_gesture_sample(tmp_path: Path) -> None:
     np.testing.assert_allclose(points, _gesture_zigzag())
 
 
+def test_controller_clears_gesture_sample(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        gesture_config=GestureRecognitionConfig(min_points=3),
+    )
+    spell = controller.add_sample_to_draft(_audio(440))
+    controller.save_gesture_sample(spell.id, _gesture_line())
+    fresh = load_spellbook(tmp_path).spells[0]
+    gesture_path = tmp_path / fresh.gesture_samples[0]
+
+    updated = controller.clear_gesture_sample(spell.id)
+
+    assert not updated.has_gesture
+    assert updated.gesture_samples == ()
+    assert not gesture_path.exists()
+    assert controller.ui_log[-1].message == f"Cleared gesture: {spell.name}"
+
+
 def test_controller_recognizes_gesture(tmp_path: Path) -> None:
     controller = _controller(
         tmp_path,
@@ -267,6 +299,21 @@ def test_desktop_ui_pages_follow_spell_order(tmp_path: Path) -> None:
     ui._go_next_page()
     assert ui.page == 1
     assert ui.selected_spell_id == first.id
+
+
+def test_desktop_ui_invalid_spell_page_does_not_auto_start_draft(
+    tmp_path: Path,
+) -> None:
+    from osc_grimoire.desktop_ui import PAGE_MAIN, DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    ui = DesktopVoiceUi(controller)
+    ui.page = 1
+
+    ui._draw_spell_page()
+
+    assert ui.page == PAGE_MAIN
+    assert controller.draft is None
 
 
 def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> None:

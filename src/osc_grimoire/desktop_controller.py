@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -18,11 +19,13 @@ from .gesture_recognizer import (
     recognize_gesture,
     save_gesture_points,
 )
+from .paths import spell_samples_dir
 from .spellbook import (
     Spell,
     Spellbook,
     add_voice_sample,
     create_spell,
+    delete_spell,
     find_spell_by_id,
     gesture_sample_path,
     load_spellbook,
@@ -280,6 +283,21 @@ class VoiceTrainingController:
         self.status = f"Deleted sample from {fresh.name}."
         return fresh
 
+    def delete_spell(self, spell_id: str) -> str:
+        spell = self._spell_or_raise(spell_id)
+        samples_dir = spell_samples_dir(self.data_dir, spell.id)
+        if samples_dir.exists():
+            shutil.rmtree(samples_dir)
+        self.spellbook = delete_spell(self.spellbook, spell.id)
+        save_spellbook(self.spellbook)
+        self._invalidate_recognition_cache()
+        self.last_result = None
+        self.last_gesture_result = None
+        self.last_match_kind = None
+        self.status = f"Deleted spell {spell.name}."
+        self.add_log(f"Deleted spell: {spell.name}")
+        return spell.name
+
     def arm_gesture_recording(self, spell_id: str) -> Spell:
         spell = self._spell_or_raise(spell_id)
         self.armed_gesture_spell_id = spell.id
@@ -310,6 +328,22 @@ class VoiceTrainingController:
         self.latest_gesture_points = points
         self.last_gesture_result = None
         self.status = f"Saved gesture for {fresh.name}."
+        return fresh
+
+    def clear_gesture_sample(self, spell_id: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        for relative_path in spell.gesture_samples:
+            path = self.data_dir / relative_path
+            if path.exists():
+                path.unlink()
+        updated = replace(spell, has_gesture=False, gesture_samples=())
+        self.spellbook = replace_spell(self.spellbook, updated)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.last_gesture_result = None
+        self.latest_gesture_points = None
+        self.status = f"Cleared gesture for {fresh.name}."
+        self.add_log(f"Cleared gesture: {fresh.name}")
         return fresh
 
     def recognize_gesture(self, points: FloatArray) -> GestureResult:
