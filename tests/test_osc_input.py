@@ -63,6 +63,30 @@ def test_osc_input_service_records_relevant_parameters_only() -> None:
     assert "OSCGrimoireVoiceEnabled" in format_recent_osc_messages(messages)
 
 
+def test_osc_input_avatar_change_invokes_resync_callback() -> None:
+    callback_calls: list[bool] = []
+    service = OscInputService(
+        OscConfig(),
+        on_avatar_change=lambda: callback_calls.append(True),
+    )
+
+    service._handle_message("/avatar/change", "avatar-id")
+
+    assert callback_calls == [True]
+    assert service.recent_messages() == ()
+
+
+def test_osc_input_set_enabled_state_mirrors_outgoing_state() -> None:
+    service = OscInputService(OscConfig())
+    service._handle_message("/avatar/parameters/OSCGrimoireVoiceEnabled", False)
+
+    service.set_enabled_state(ui_enabled=False, voice_enabled=True)
+
+    assert not service.ui_enabled
+    assert service.gesture_enabled
+    assert service.voice_enabled
+
+
 def test_osc_input_disabled_does_not_start() -> None:
     service = OscInputService(OscConfig(input_enabled=False))
 

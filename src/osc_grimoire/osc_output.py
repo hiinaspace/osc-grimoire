@@ -184,6 +184,22 @@ class OscOutput:
     def set_gesture_drawing(self, drawing: bool) -> None:
         self.send_bool(f"{self.config.parameter_prefix}GestureDrawing", drawing)
 
+    def set_ui_enabled(self, enabled: bool) -> None:
+        self.send_bool(f"{self.config.parameter_prefix}UIEnabled", enabled)
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        self.send_bool(f"{self.config.parameter_prefix}VoiceEnabled", enabled)
+
+    def set_gesture_enabled(self, enabled: bool) -> None:
+        self.send_bool(f"{self.config.parameter_prefix}GestureEnabled", enabled)
+
+    def set_enable_toggles(
+        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+    ) -> None:
+        self.set_ui_enabled(ui_enabled)
+        self.set_gesture_enabled(gesture_enabled)
+        self.set_voice_enabled(voice_enabled)
+
     def pulse_spell(self, spell: Spell) -> None:
         self.pulse_bool(spell_osc_parameter_name(spell, self.config))
 

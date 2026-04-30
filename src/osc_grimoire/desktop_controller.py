@@ -77,6 +77,16 @@ class OutputSink(Protocol):
 
     def set_gesture_drawing(self, drawing: bool) -> None: ...
 
+    def set_ui_enabled(self, enabled: bool) -> None: ...
+
+    def set_voice_enabled(self, enabled: bool) -> None: ...
+
+    def set_gesture_enabled(self, enabled: bool) -> None: ...
+
+    def set_enable_toggles(
+        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+    ) -> None: ...
+
     def pulse_spell(self, spell: Spell) -> None: ...
 
     def pulse_fizzle(self) -> None: ...
@@ -91,6 +101,14 @@ class InputSink(Protocol):
     voice_enabled: bool
 
     def recent_messages(self) -> tuple[Any, ...]: ...
+
+    def set_enabled_state(
+        self,
+        *,
+        ui_enabled: bool | None = None,
+        gesture_enabled: bool | None = None,
+        voice_enabled: bool | None = None,
+    ) -> None: ...
 
     def stop(self) -> None: ...
 
@@ -197,18 +215,30 @@ class VoiceTrainingController:
 
     def set_gesture_enabled(self, enabled: bool) -> None:
         self.local_gesture_enabled = enabled
+        if self.osc_input is not None:
+            self.osc_input.set_enabled_state(gesture_enabled=enabled)
+        if self.output is not None:
+            self.output.set_gesture_enabled(enabled)
         self.status = f"Gesture input {'enabled' if enabled else 'disabled'}."
 
     def set_voice_enabled(self, enabled: bool) -> None:
         self.local_voice_enabled = enabled
+        if self.osc_input is not None:
+            self.osc_input.set_enabled_state(voice_enabled=enabled)
+        if self.output is not None:
+            self.output.set_voice_enabled(enabled)
         self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
 
     def set_ui_enabled(self, enabled: bool) -> None:
         self.local_ui_enabled = enabled
+        if self.osc_input is not None:
+            self.osc_input.set_enabled_state(ui_enabled=enabled)
+        if self.output is not None:
+            self.output.set_ui_enabled(enabled)
         self.status = f"UI {'shown' if enabled else 'hidden'}."
 
     def toggle_ui_enabled(self) -> None:
-        self.set_ui_enabled(not self.local_ui_enabled)
+        self.set_ui_enabled(not self.ui_enabled)
 
     def set_casting_hand(self, hand: str) -> None:
         if hand not in {"left", "right"}:
@@ -274,6 +304,15 @@ class VoiceTrainingController:
     def set_gesture_drawing(self, drawing: bool) -> None:
         if self.output is not None:
             self.output.set_gesture_drawing(drawing)
+
+    def sync_enable_toggles_to_output(self) -> None:
+        if self.output is None:
+            return
+        self.output.set_enable_toggles(
+            ui_enabled=self.ui_enabled,
+            gesture_enabled=self.gesture_enabled,
+            voice_enabled=self.voice_enabled,
+        )
 
     def tick_outputs(self, now: float | None = None) -> None:
         if self.output is not None:

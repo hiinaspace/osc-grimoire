@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -51,9 +51,11 @@ class OscInputService:
         config: OscConfig,
         *,
         time_fn=time.monotonic,
+        on_avatar_change: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.time_fn = time_fn
+        self.on_avatar_change = on_avatar_change
         self._messages: deque[ReceivedOscMessage] = deque(
             maxlen=max(1, config.input_log_limit)
         )
@@ -153,6 +155,11 @@ class OscInputService:
         return self.state.voice_enabled
 
     def _handle_message(self, address: str, *values: Any) -> None:
+        if address == "/avatar/change":
+            LOGGER.info("OSC avatar changed; requesting state resync.")
+            if self.on_avatar_change is not None:
+                self.on_avatar_change()
+            return
         state_update = parse_enabled_parameter(address, values, self.config)
         if state_update is None:
             return
@@ -166,6 +173,25 @@ class OscInputService:
             self._messages.append(message)
         self._refresh_status_text()
         LOGGER.info("OSC control %s -> %s", message.format(), self.state)
+
+    def set_enabled_state(
+        self,
+        *,
+        ui_enabled: bool | None = None,
+        gesture_enabled: bool | None = None,
+        voice_enabled: bool | None = None,
+    ) -> None:
+        with self._lock:
+            self._state = OscInputState(
+                ui_enabled=self._state.ui_enabled if ui_enabled is None else ui_enabled,
+                gesture_enabled=self._state.gesture_enabled
+                if gesture_enabled is None
+                else gesture_enabled,
+                voice_enabled=self._state.voice_enabled
+                if voice_enabled is None
+                else voice_enabled,
+            )
+        self._refresh_status_text()
 
     def _refresh_status_text(self) -> None:
         port_text = ""

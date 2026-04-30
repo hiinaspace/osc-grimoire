@@ -185,17 +185,26 @@ def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
 
 def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -> None:
     osc_input = _FakeInput()
+    output = _FakeOutput()
     controller = _controller(tmp_path)
     controller.osc_input = osc_input
+    controller.output = output
 
     assert controller.voice_enabled
     assert controller.gesture_enabled
 
     controller.set_voice_enabled(False)
     controller.set_gesture_enabled(False)
+    controller.set_ui_enabled(False)
 
+    assert osc_input.voice_enabled is False
+    assert osc_input.gesture_enabled is False
+    assert osc_input.ui_enabled is False
     assert not controller.voice_enabled
     assert not controller.gesture_enabled
+    assert output.voice_enabled == [False]
+    assert output.gesture_enabled == [False]
+    assert output.ui_enabled == [False]
 
     controller.set_voice_enabled(True)
     controller.set_gesture_enabled(True)
@@ -204,6 +213,19 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
 
     assert not controller.voice_enabled
     assert not controller.gesture_enabled
+
+
+def test_controller_resyncs_effective_toggles_to_output(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    osc_input = _FakeInput()
+    osc_input.voice_enabled = False
+    controller = _controller(tmp_path)
+    controller.output = output
+    controller.osc_input = osc_input
+
+    controller.sync_enable_toggles_to_output()
+
+    assert output.enable_toggles == [(True, True, False)]
 
 
 def test_controller_can_set_local_ui_visibility(tmp_path: Path) -> None:
@@ -218,6 +240,19 @@ def test_controller_can_set_local_ui_visibility(tmp_path: Path) -> None:
 
     assert controller.local_ui_enabled
     assert controller.ui_enabled
+
+
+def test_controller_ui_toggle_uses_effective_state(tmp_path: Path) -> None:
+    osc_input = _FakeInput()
+    osc_input.ui_enabled = False
+    controller = _controller(tmp_path)
+    controller.osc_input = osc_input
+
+    controller.toggle_ui_enabled()
+
+    assert controller.local_ui_enabled
+    assert controller.ui_enabled
+    assert osc_input.ui_enabled
 
 
 def test_controller_casting_hand_moves_book_to_opposite_hand(tmp_path: Path) -> None:
@@ -644,6 +679,10 @@ class _FakeOutput:
     def __init__(self) -> None:
         self.voice_recording: list[bool] = []
         self.gesture_drawing: list[bool] = []
+        self.ui_enabled: list[bool] = []
+        self.voice_enabled: list[bool] = []
+        self.gesture_enabled: list[bool] = []
+        self.enable_toggles: list[tuple[bool, bool, bool]] = []
         self.spell_pulses: list[str] = []
         self.fizzle_count = 0
         self.tick_count = 0
@@ -653,6 +692,20 @@ class _FakeOutput:
 
     def set_gesture_drawing(self, drawing: bool) -> None:
         self.gesture_drawing.append(drawing)
+
+    def set_ui_enabled(self, enabled: bool) -> None:
+        self.ui_enabled.append(enabled)
+
+    def set_voice_enabled(self, enabled: bool) -> None:
+        self.voice_enabled.append(enabled)
+
+    def set_gesture_enabled(self, enabled: bool) -> None:
+        self.gesture_enabled.append(enabled)
+
+    def set_enable_toggles(
+        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+    ) -> None:
+        self.enable_toggles.append((ui_enabled, gesture_enabled, voice_enabled))
 
     def pulse_spell(self, spell) -> None:
         self.spell_pulses.append(spell.name)
@@ -674,6 +727,20 @@ class _FakeInput:
 
     def recent_messages(self) -> tuple[Any, ...]:
         return ()
+
+    def set_enabled_state(
+        self,
+        *,
+        ui_enabled: bool | None = None,
+        gesture_enabled: bool | None = None,
+        voice_enabled: bool | None = None,
+    ) -> None:
+        if ui_enabled is not None:
+            self.ui_enabled = ui_enabled
+        if gesture_enabled is not None:
+            self.gesture_enabled = gesture_enabled
+        if voice_enabled is not None:
+            self.voice_enabled = voice_enabled
 
     def stop(self) -> None:
         pass

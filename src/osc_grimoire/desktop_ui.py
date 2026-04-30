@@ -1126,17 +1126,17 @@ class DesktopVoiceUi:
 
         summary = self._osc_status_summary()
         if not self.overlay_mode:
-            ui_enabled = self.controller.local_ui_enabled
+            ui_enabled = self.controller.ui_enabled
             changed, ui_enabled = imgui.checkbox("Spellbook", ui_enabled)
             if changed:
                 self.controller.set_ui_enabled(ui_enabled)
             imgui.same_line()
-        voice_enabled = self.controller.local_voice_enabled
+        voice_enabled = self.controller.voice_enabled
         changed, voice_enabled = imgui.checkbox("Voice", voice_enabled)
         if changed:
             self.controller.set_voice_enabled(voice_enabled)
         imgui.same_line()
-        gesture_enabled = self.controller.local_gesture_enabled
+        gesture_enabled = self.controller.gesture_enabled
         changed, gesture_enabled = imgui.checkbox("Gesture", gesture_enabled)
         if changed:
             self.controller.set_gesture_enabled(gesture_enabled)
@@ -1468,8 +1468,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     osc_output = OscOutput(controller.config.osc)
     controller.output = osc_output
     osc_input = OscInputService(controller.config.osc)
-    osc_input.start()
     controller.osc_input = osc_input
+    osc_input.on_avatar_change = controller.sync_enable_toggles_to_output
+    osc_input.start()
+    controller.sync_enable_toggles_to_output()
     controller.status = "Loading voice model..."
     controller.preload_backend()
     controller.status = "Ready."

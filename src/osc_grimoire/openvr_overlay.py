@@ -259,10 +259,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = AppConfig()
     osc_output = OscOutput(config.osc)
     osc_input = OscInputService(config.osc)
-    osc_input.start()
     controller = VoiceTrainingController(
         data_dir, config=config, output=osc_output, osc_input=osc_input
     )
+    osc_input.on_avatar_change = controller.sync_enable_toggles_to_output
+    osc_input.start()
+    controller.sync_enable_toggles_to_output()
     controller.status = "Loading voice model..."
     controller.preload_backend()
     if not args.start_overlay and not is_steamvr_running():
