@@ -15,7 +15,7 @@ from osc_grimoire.config import (
 )
 from osc_grimoire.desktop_controller import GrimoireController
 from osc_grimoire.gesture_recognizer import load_gesture_points
-from osc_grimoire.spellbook import PRESET_SPELL_NAMES, load_spellbook
+from osc_grimoire.spellbook import PRESET_SPELL_NAMES, OscAction, load_spellbook
 from osc_grimoire.voice_features import FloatArray
 from osc_grimoire.voice_recognizer import TextHypothesis, VoiceTemplateBackend
 from osc_grimoire.waveform import downsample_waveform, load_waveform_preview
@@ -96,6 +96,25 @@ def test_controller_updates_spell_osc_parameter(tmp_path: Path) -> None:
     assert controller.spell_osc_parameter_name(reset).startswith("OSCGrimoireSpell")
 
 
+def test_controller_updates_spell_osc_actions(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.persist_draft()
+
+    updated = controller.update_spell_osc_actions(
+        spell.id,
+        on_cast=(OscAction("Spell", 3), OscAction("MagicPrepared", True)),
+        after_cast=(),
+    )
+
+    assert updated.osc_on_cast == (
+        OscAction("Spell", 3),
+        OscAction("MagicPrepared", True),
+    )
+    assert updated.osc_after_cast == ()
+    assert controller.spell_osc_signal_summary(updated) == "Spell=3, MagicPrepared=true"
+    assert load_spellbook(tmp_path).spells[-1].osc_on_cast == updated.osc_on_cast
+
+
 def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
 
@@ -121,7 +140,7 @@ def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
     assert output.fizzle_count == 0
     assert (
         controller.ui_log[-1].message
-        == "Accepted: Alohomora (osc: OSCGrimoireSpellAlohomora)"
+        == "Accepted: Alohomora (osc: OSCGrimoireSpellAlohomora=true -> OSCGrimoireSpellAlohomora=false)"
     )
 
 
@@ -334,6 +353,10 @@ def test_desktop_ui_extracts_osc_parameter_from_log() -> None:
         _osc_parameter_from_log("[12:00:01] Accepted: Lumos (osc: CustomLumos)")
         == "CustomLumos"
     )
+    assert (
+        _osc_parameter_from_log("[12:00:01] Accepted: Lumos (osc: Spell=3 -> 0)")
+        == "Spell"
+    )
     assert _osc_parameter_from_log("[12:00:01] Ready.") is None
 
 
@@ -424,11 +447,38 @@ def test_desktop_ui_osc_edit_updates_spell_parameter(tmp_path: Path) -> None:
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.osc_editing = True
     ui.osc_edit_spell_id = spell.id
-    ui.osc_edit_value = "CustomFire"
+    ui.osc_on_cast_edit = "CustomFire=true"
+    ui.osc_after_cast_edit = "CustomFire=false"
 
     ui._finish_osc_edit(commit=True)
 
-    assert controller.spellbook.spells[0].osc_address == "CustomFire"
+    assert controller.spellbook.spells[0].osc_on_cast == (
+        OscAction("CustomFire", True),
+    )
+    assert controller.spellbook.spells[0].osc_after_cast == (
+        OscAction("CustomFire", False),
+    )
+
+
+def test_desktop_ui_osc_edit_updates_custom_spell_actions(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.spellbook.spells[0]
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    ui.osc_editing = True
+    ui.osc_edit_spell_id = spell.id
+    ui.osc_on_cast_edit = "Spell=4, MagicPrepared=true"
+    ui.osc_after_cast_edit = ""
+
+    ui._finish_osc_edit(commit=True)
+
+    updated = controller.spellbook.spells[0]
+    assert updated.osc_on_cast == (
+        OscAction("Spell", 4),
+        OscAction("MagicPrepared", True),
+    )
+    assert updated.osc_after_cast == ()
 
 
 def test_desktop_ui_spoken_name_requires_confirmation(

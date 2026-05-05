@@ -13,6 +13,13 @@ LOGGER = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
 PRESET_SPELL_NAMES = ("Alohomora", "Spongify", "Rictusempra", "Flipendo")
+OscValue = bool | int | float
+
+
+@dataclass(frozen=True)
+class OscAction:
+    parameter: str
+    value: OscValue
 
 
 @dataclass(frozen=True)
@@ -25,6 +32,8 @@ class Spell:
     voice_aliases: tuple[str, ...] = ()
     gesture_samples: tuple[str, ...] = ()
     osc_address: str | None = None
+    osc_on_cast: tuple[OscAction, ...] | None = None
+    osc_after_cast: tuple[OscAction, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,63 @@ def normalize_voice_alias(alias: str) -> str:
     return cleaned
 
 
+def parse_osc_actions(text: str) -> tuple[OscAction, ...]:
+    actions: list[OscAction] = []
+    for raw_part in text.replace("\n", ",").split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"OSC action {part!r} must be parameter=value")
+        parameter, raw_value = part.split("=", 1)
+        actions.append(
+            OscAction(
+                parameter=normalize_osc_parameter(parameter),
+                value=parse_osc_value(raw_value),
+            )
+        )
+    return tuple(actions)
+
+
+def format_osc_actions(actions: tuple[OscAction, ...]) -> str:
+    return ", ".join(format_osc_action(action) for action in actions)
+
+
+def format_osc_action(action: OscAction) -> str:
+    value = action.value
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    else:
+        text = str(value)
+    return f"{action.parameter}={text}"
+
+
+def parse_osc_value(text: str) -> OscValue:
+    clean = text.strip()
+    folded = clean.casefold()
+    if folded == "true":
+        return True
+    if folded == "false":
+        return False
+    try:
+        return int(clean)
+    except ValueError:
+        pass
+    try:
+        return float(clean)
+    except ValueError as exc:
+        raise ValueError(
+            f"OSC value {text!r} must be true, false, int, or float"
+        ) from exc
+
+
+def normalize_osc_parameter(parameter: str) -> str:
+    clean = parameter.strip()
+    if not clean:
+        raise ValueError("OSC parameter cannot be empty")
+    return clean
+
+
 def _spell_from_json(entry: dict) -> Spell:
     modalities = entry.get("modalities", {})
     samples = entry.get("samples", {})
@@ -225,6 +291,22 @@ def _spell_from_json(entry: dict) -> Spell:
         for alias in recognition.get("voice_aliases", ())
         if str(alias).strip()
     )
+    on_cast = _osc_actions_from_json(osc, "on_cast")
+    after_cast = _osc_actions_from_json(osc, "after_cast")
+    if on_cast is None and after_cast is None and osc.get("mode") == "int":
+        parameter = str(osc.get("address") or entry["name"])
+        on_cast = (
+            OscAction(
+                parameter=normalize_osc_parameter(parameter),
+                value=int(osc.get("int_value", 1)),
+            ),
+        )
+        after_cast = (
+            OscAction(
+                parameter=normalize_osc_parameter(parameter),
+                value=int(osc.get("int_reset_value", 0)),
+            ),
+        )
     return Spell(
         id=entry["id"],
         name=entry["name"],
@@ -234,7 +316,28 @@ def _spell_from_json(entry: dict) -> Spell:
         voice_aliases=aliases,
         gesture_samples=tuple(samples.get("gestures", ())),
         osc_address=osc.get("address"),
+        osc_on_cast=on_cast,
+        osc_after_cast=after_cast,
     )
+
+
+def _osc_actions_from_json(osc: dict, key: str) -> tuple[OscAction, ...] | None:
+    if key not in osc:
+        return None
+    return tuple(_osc_action_from_json(entry) for entry in osc.get(key, ()))
+
+
+def _osc_action_from_json(entry: dict) -> OscAction:
+    return OscAction(
+        parameter=normalize_osc_parameter(str(entry["parameter"])),
+        value=_osc_value_from_json(entry["value"]),
+    )
+
+
+def _osc_value_from_json(value: object) -> OscValue:
+    if isinstance(value, bool | int | float):
+        return value
+    raise ValueError(f"Unsupported OSC action value {value!r}")
 
 
 def _spell_to_json(spell: Spell) -> dict:
@@ -246,7 +349,7 @@ def _spell_to_json(spell: Spell) -> dict:
             "gesture": spell.has_gesture,
             "voice": spell.has_voice,
         },
-        "osc": ({"address": spell.osc_address} if spell.osc_address else None),
+        "osc": _osc_to_json(spell),
         "recognition": {
             "voice_aliases": list(spell.voice_aliases),
         },
@@ -254,3 +357,18 @@ def _spell_to_json(spell: Spell) -> dict:
             "gestures": list(spell.gesture_samples),
         },
     }
+
+
+def _osc_to_json(spell: Spell) -> dict | None:
+    payload: dict[str, object] = {}
+    if spell.osc_address:
+        payload["address"] = spell.osc_address
+    if spell.osc_on_cast is not None:
+        payload["on_cast"] = [_osc_action_to_json(a) for a in spell.osc_on_cast]
+    if spell.osc_after_cast is not None:
+        payload["after_cast"] = [_osc_action_to_json(a) for a in spell.osc_after_cast]
+    return payload or None
+
+
+def _osc_action_to_json(action: OscAction) -> dict[str, object]:
+    return {"parameter": action.parameter, "value": action.value}

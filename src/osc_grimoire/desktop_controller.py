@@ -18,9 +18,14 @@ from .gesture_recognizer import (
     recognize_gesture,
     save_gesture_points,
 )
-from .osc_output import fizzle_osc_parameter_name, spell_osc_parameter_name
+from .osc_output import (
+    fizzle_osc_parameter_name,
+    spell_osc_parameter_name,
+    spell_osc_signal_summary,
+)
 from .paths import spell_samples_dir
 from .spellbook import (
+    OscAction,
     Spell,
     add_voice_alias,
     create_spell,
@@ -391,15 +396,38 @@ class GrimoireController:
         return fresh
 
     def update_spell_osc_address(self, spell_id: str, value: str) -> Spell:
+        return self.update_spell_osc_actions(
+            spell_id,
+            on_cast=None,
+            after_cast=None,
+            address=value,
+        )
+
+    def update_spell_osc_actions(
+        self,
+        spell_id: str,
+        *,
+        on_cast: tuple[OscAction, ...] | None,
+        after_cast: tuple[OscAction, ...] | None,
+        address: str | None = None,
+    ) -> Spell:
         spell = self._spell_or_raise(spell_id)
-        updated = replace(spell, osc_address=value.strip() or None)
+        updated = replace(
+            spell,
+            osc_address=(address or "").strip() or None,
+            osc_on_cast=on_cast,
+            osc_after_cast=after_cast,
+        )
         self.spellbook = replace_spell(self.spellbook, updated)
         save_spellbook(self.spellbook)
-        self.status = f"OSC parameter set to {self.spell_osc_parameter_name(updated)}."
+        self.status = f"OSC signal set to {self.spell_osc_signal_summary(updated)}."
         return updated
 
     def spell_osc_parameter_name(self, spell: Spell) -> str:
         return spell_osc_parameter_name(spell, self.config.osc)
+
+    def spell_osc_signal_summary(self, spell: Spell) -> str:
+        return spell_osc_signal_summary(spell, self.config.osc)
 
     def fizzle_osc_parameter_name(self) -> str:
         return fizzle_osc_parameter_name(self.config.osc)
@@ -522,7 +550,7 @@ class GrimoireController:
         if result.decision.accepted and result.decision.best_spell_id is not None:
             spell = self._spell_or_raise(result.decision.best_spell_id)
             self.add_log(
-                f"Accepted: {spell.name} (osc: {self.spell_osc_parameter_name(spell)})"
+                f"Accepted: {spell.name} (osc: {self.spell_osc_signal_summary(spell)})"
             )
         else:
             self.add_log(
@@ -565,7 +593,7 @@ class GrimoireController:
             spell = self._spell_or_raise(ranking[0].spell_id)
             self.add_log(
                 f"Accepted: {ranking[0].name} "
-                f"(osc: {self.spell_osc_parameter_name(spell)})"
+                f"(osc: {self.spell_osc_signal_summary(spell)})"
             )
         else:
             self.add_log(

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import OscConfig
-from .spellbook import Spell
+from .spellbook import OscAction, Spell, format_osc_actions
 
 LOGGER = logging.getLogger(__name__)
 AVATAR_PARAMETER_PREFIX = "/avatar/parameters/"
@@ -49,6 +49,24 @@ def spell_osc_parameter_name(spell: Spell, config: OscConfig) -> str:
         return avatar_parameter_name(spell.osc_address)
     suffix = safe_spell_parameter_suffix(spell.name, spell.id)
     return f"{config.parameter_prefix}Spell{suffix}"
+
+
+def spell_osc_signal_summary(spell: Spell, config: OscConfig) -> str:
+    on_cast, after_cast = spell_osc_actions(spell, config)
+    on_text = format_osc_actions(on_cast) or "(nothing)"
+    after_text = format_osc_actions(after_cast)
+    if after_text:
+        return f"{on_text} -> {after_text}"
+    return f"{on_text}"
+
+
+def spell_osc_actions(
+    spell: Spell, config: OscConfig
+) -> tuple[tuple[OscAction, ...], tuple[OscAction, ...]]:
+    if spell.osc_on_cast is None and spell.osc_after_cast is None:
+        parameter = spell_osc_parameter_name(spell, config)
+        return (OscAction(parameter, True),), (OscAction(parameter, False),)
+    return spell.osc_on_cast or (), spell.osc_after_cast or ()
 
 
 def fizzle_osc_parameter_name(config: OscConfig) -> str:
@@ -145,7 +163,7 @@ class OscOutput:
         self.time_fn = time_fn
         self.target = target or discover_osc_target(config)
         self.client = client or self._create_client(self.target)
-        self._pulse_deadlines: dict[str, float] = {}
+        self._scheduled_actions: list[tuple[float, OscAction]] = []
 
     @property
     def status_text(self) -> str:
@@ -159,24 +177,46 @@ class OscOutput:
         self.client.send_message(avatar_parameter_path(path), bool(value))
 
     def pulse_bool(self, path: str) -> None:
+        self.pulse_actions(
+            (OscAction(path, True),),
+            (OscAction(path, False),),
+        )
+
+    def pulse_actions(
+        self,
+        on_cast: tuple[OscAction, ...],
+        after_cast: tuple[OscAction, ...] = (),
+    ) -> None:
         if not self.config.enabled:
             return
-        resolved = avatar_parameter_path(path)
-        self.client.send_message(resolved, True)
-        self._pulse_deadlines[resolved] = self.time_fn() + self.config.pulse_seconds
+        for action in on_cast:
+            self.send_action(action)
+        if after_cast:
+            after_paths = {
+                avatar_parameter_path(action.parameter) for action in after_cast
+            }
+            self._scheduled_actions = [
+                (deadline, action)
+                for deadline, action in self._scheduled_actions
+                if avatar_parameter_path(action.parameter) not in after_paths
+            ]
+            deadline = self.time_fn() + self.config.pulse_seconds
+            self._scheduled_actions.extend((deadline, action) for action in after_cast)
+
+    def send_action(self, action: OscAction) -> None:
+        self.client.send_message(avatar_parameter_path(action.parameter), action.value)
 
     def tick(self, now: float | None = None) -> None:
         if not self.config.enabled:
             return
         current = self.time_fn() if now is None else now
-        expired = [
-            path
-            for path, deadline in self._pulse_deadlines.items()
-            if current >= deadline
-        ]
-        for path in expired:
-            self.client.send_message(path, False)
-            del self._pulse_deadlines[path]
+        pending: list[tuple[float, OscAction]] = []
+        for deadline, action in self._scheduled_actions:
+            if current >= deadline:
+                self.send_action(action)
+            else:
+                pending.append((deadline, action))
+        self._scheduled_actions = pending
 
     def set_voice_recording(self, recording: bool) -> None:
         self.send_bool(f"{self.config.parameter_prefix}VoiceRecording", recording)
@@ -201,7 +241,8 @@ class OscOutput:
         self.set_voice_enabled(voice_enabled)
 
     def pulse_spell(self, spell: Spell) -> None:
-        self.pulse_bool(spell_osc_parameter_name(spell, self.config))
+        on_cast, after_cast = spell_osc_actions(spell, self.config)
+        self.pulse_actions(on_cast, after_cast)
 
     def pulse_fizzle(self) -> None:
         self.pulse_bool(fizzle_osc_parameter_name(self.config))

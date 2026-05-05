@@ -10,8 +10,9 @@ from osc_grimoire.osc_output import (
     safe_spell_parameter_suffix,
     select_osc_target_from_services,
     spell_osc_parameter_name,
+    spell_osc_signal_summary,
 )
-from osc_grimoire.spellbook import Spell
+from osc_grimoire.spellbook import OscAction, Spell
 
 
 def test_safe_spell_parameter_suffix_cleans_display_name() -> None:
@@ -57,6 +58,30 @@ def test_spell_osc_parameter_uses_override_or_default() -> None:
             config,
         )
         == "CustomFire"
+    )
+
+
+def test_spell_osc_signal_summary_describes_default_or_custom_actions() -> None:
+    config = OscConfig(parameter_prefix="OSCGrimoire")
+
+    assert (
+        spell_osc_signal_summary(Spell(id="spell-1", name="Lumos"), config)
+        == "OSCGrimoireSpellLumos=true -> OSCGrimoireSpellLumos=false"
+    )
+    assert (
+        spell_osc_signal_summary(
+            Spell(
+                id="spell-1",
+                name="Lumos",
+                osc_on_cast=(
+                    OscAction("Spell", 4),
+                    OscAction("MagicPrepared", True),
+                ),
+                osc_after_cast=(),
+            ),
+            config,
+        )
+        == "Spell=4, MagicPrepared=true"
     )
 
 
@@ -132,6 +157,62 @@ def test_osc_output_sends_recording_pulses_and_resets() -> None:
     ]
 
 
+def test_osc_output_extends_pending_after_actions_for_same_parameter() -> None:
+    client = _FakeOscClient()
+    clock = _Clock()
+    output = OscOutput(
+        OscConfig(pulse_seconds=0.15),
+        client=client,
+        target=OscTarget("127.0.0.1", 9000, "test"),
+        time_fn=clock.now,
+    )
+    spell = Spell(id="spell-1", name="Lumos", osc_address="CustomFire")
+
+    output.pulse_spell(spell)
+    clock.value = 0.10
+    output.pulse_spell(spell)
+    clock.value = 0.16
+    output.tick()
+    clock.value = 0.26
+    output.tick()
+
+    assert client.messages == [
+        ("/avatar/parameters/CustomFire", True),
+        ("/avatar/parameters/CustomFire", True),
+        ("/avatar/parameters/CustomFire", False),
+    ]
+
+
+def test_osc_output_can_send_custom_spell_actions_without_end_actions() -> None:
+    client = _FakeOscClient()
+    clock = _Clock()
+    output = OscOutput(
+        OscConfig(pulse_seconds=0.15),
+        client=client,
+        target=OscTarget("127.0.0.1", 9000, "test"),
+        time_fn=clock.now,
+    )
+
+    output.pulse_spell(
+        Spell(
+            id="spell-1",
+            name="Lumos",
+            osc_on_cast=(
+                OscAction("Spell", 7),
+                OscAction("MagicPrepared", True),
+            ),
+            osc_after_cast=(),
+        )
+    )
+    clock.value = 0.20
+    output.tick()
+
+    assert client.messages == [
+        ("/avatar/parameters/Spell", 7),
+        ("/avatar/parameters/MagicPrepared", True),
+    ]
+
+
 class _Clock:
     value = 0.0
 
@@ -141,7 +222,7 @@ class _Clock:
 
 class _FakeOscClient:
     def __init__(self) -> None:
-        self.messages: list[tuple[str, bool]] = []
+        self.messages: list[tuple[str, object]] = []
 
-    def send_message(self, path: str, value: bool) -> None:
+    def send_message(self, path: str, value: object) -> None:
         self.messages.append((path, value))

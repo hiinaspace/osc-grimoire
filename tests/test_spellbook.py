@@ -7,6 +7,8 @@ import pytest
 
 from osc_grimoire.spellbook import (
     PRESET_SPELL_NAMES,
+    OscAction,
+    Spell,
     Spellbook,
     add_voice_alias,
     create_spell,
@@ -50,6 +52,28 @@ def test_create_save_load_alias_round_trip(tmp_path: Path) -> None:
     assert s.has_voice is True
     assert s.has_gesture is False
     assert s.voice_aliases == ("Flipendo", "Fli pendo")
+
+
+def test_spell_osc_actions_round_trip(tmp_path: Path) -> None:
+    spell = Spell(
+        id="spell-1",
+        name="Flipendo",
+        voice_aliases=("Flipendo",),
+        osc_on_cast=(
+            OscAction("Spell", 3),
+            OscAction("MagicPrepared", True),
+        ),
+        osc_after_cast=(),
+    )
+    save_spellbook(Spellbook(tmp_path, (spell,)))
+
+    reloaded = load_spellbook(tmp_path)
+
+    assert reloaded.spells[0].osc_on_cast == (
+        OscAction("Spell", 3),
+        OscAction("MagicPrepared", True),
+    )
+    assert reloaded.spells[0].osc_after_cast == ()
 
 
 def test_v1_spellbook_is_explicitly_unsupported(tmp_path: Path) -> None:

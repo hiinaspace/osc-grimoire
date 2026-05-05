@@ -18,9 +18,9 @@ from .desktop_controller import (
 )
 from .gesture_recognizer import GestureRanking
 from .osc_input import OscInputService
-from .osc_output import OscOutput
+from .osc_output import OscOutput, spell_osc_actions
 from .paths import default_data_dir
-from .spellbook import Spell
+from .spellbook import Spell, format_osc_actions, parse_osc_actions
 from .voice_features import FloatArray
 
 LOGGER = logging.getLogger(__name__)
@@ -63,8 +63,8 @@ class DesktopVoiceUi:
         self.keyboard_original_name = ""
         self.osc_edit_spell_id: str | None = None
         self.osc_editing = False
-        self.osc_edit_value = ""
-        self.osc_original_value = ""
+        self.osc_on_cast_edit = ""
+        self.osc_after_cast_edit = ""
         self.osc_focus_pending = False
         self.pending_spoken_name: str | None = None
         self.pending_spoken_name_spell_id: str | None = None
@@ -256,7 +256,7 @@ class DesktopVoiceUi:
             if not self.overlay_mode:
                 self._draw_copy_button(osc_parameter, tooltip="OSC parameter")
                 imgui.same_line()
-            osc_label = f"osc: {osc_parameter}"
+            osc_label = f"osc: {self.controller.spell_osc_signal_summary(spell)}"
             imgui.text_disabled(
                 _left_elide_text_to_width(
                     osc_label,
@@ -527,7 +527,7 @@ class DesktopVoiceUi:
 
         imgui.separator()
         osc_parameter = self.controller.spell_osc_parameter_name(spell)
-        imgui.text(f"OSC parameter: {osc_parameter}")
+        imgui.text(f"OSC signal: {self.controller.spell_osc_signal_summary(spell)}")
         if not self.overlay_mode:
             imgui.same_line()
             self._draw_copy_button(osc_parameter, tooltip="OSC parameter")
@@ -535,8 +535,15 @@ class DesktopVoiceUi:
             if self.osc_focus_pending:
                 imgui.set_keyboard_focus_here()
                 self.osc_focus_pending = False
-            _changed, value = imgui.input_text("OSC parameter", self.osc_edit_value)
-            self.osc_edit_value = value
+            imgui.text_disabled(
+                "Use comma-separated actions like Spell=1, MagicPrepared=true."
+            )
+            _changed, value = imgui.input_text("On cast", self.osc_on_cast_edit)
+            self.osc_on_cast_edit = value
+            _changed, value = imgui.input_text(
+                "After duration", self.osc_after_cast_edit
+            )
+            self.osc_after_cast_edit = value
             if imgui.button("Save OSC"):
                 self._finish_osc_edit(commit=True)
             imgui.same_line()
@@ -547,19 +554,32 @@ class DesktopVoiceUi:
                 self._request_osc_keyboard(spell)
             imgui.same_line()
             if imgui.button("Use Default"):
-                self.osc_edit_value = ""
+                self.osc_on_cast_edit = ""
+                self.osc_after_cast_edit = ""
                 self._finish_osc_edit(commit=True)
             imgui.text_disabled(
-                "Leave blank to use the default derived from the spell name."
+                "Default is SpellName=true on cast, then SpellName=false after duration."
             )
+            imgui.text_disabled("Leave after duration blank for no ending actions.")
             return
         if imgui.button("Edit OSC"):
             self.osc_edit_spell_id = spell.id
             self.osc_editing = True
-            self.osc_edit_value = (
-                spell.osc_address or self.controller.spell_osc_parameter_name(spell)
-            )
-            self.osc_original_value = spell.osc_address or ""
+            if spell.osc_on_cast is None and spell.osc_after_cast is None:
+                if spell.osc_address:
+                    on_cast, after_cast = spell_osc_actions(
+                        spell, self.controller.config.osc
+                    )
+                    self.osc_on_cast_edit = format_osc_actions(on_cast)
+                    self.osc_after_cast_edit = format_osc_actions(after_cast)
+                else:
+                    self.osc_on_cast_edit = ""
+                    self.osc_after_cast_edit = ""
+            else:
+                self.osc_on_cast_edit = format_osc_actions(spell.osc_on_cast or ())
+                self.osc_after_cast_edit = format_osc_actions(
+                    spell.osc_after_cast or ()
+                )
             self.osc_focus_pending = True
 
     def _request_osc_keyboard(self, spell: Spell) -> None:
@@ -567,7 +587,7 @@ class DesktopVoiceUi:
             self.controller.status = "SteamVR keyboard is unavailable."
             return
         if self.keyboard_request_handler(
-            spell.id, self.osc_edit_value, "OSC parameter"
+            spell.id, self.osc_on_cast_edit, "OSC on cast"
         ):
             self.osc_focus_pending = True
             self.controller.status = "SteamVR keyboard opened."
@@ -576,6 +596,24 @@ class DesktopVoiceUi:
 
     def _finish_osc_edit(self, *, commit: bool) -> None:
         spell_id = self.osc_edit_spell_id
+        if commit:
+            try:
+                if self.osc_on_cast_edit.strip() or self.osc_after_cast_edit.strip():
+                    on_cast = parse_osc_actions(self.osc_on_cast_edit)
+                    after_cast = parse_osc_actions(self.osc_after_cast_edit)
+                else:
+                    on_cast = None
+                    after_cast = None
+                if spell_id is not None:
+                    spell = self.controller.update_spell_osc_actions(
+                        spell_id,
+                        on_cast=on_cast,
+                        after_cast=after_cast,
+                    )
+                    self.selected_spell_id = spell.id
+            except ValueError as exc:
+                self.controller.status = str(exc)
+                return
         if self.keyboard_close_handler is not None:
             self.keyboard_close_handler()
         self.osc_editing = False
@@ -584,13 +622,10 @@ class DesktopVoiceUi:
         if spell_id is None:
             return
         if not commit:
-            self.osc_edit_value = self.osc_original_value
-            self.osc_original_value = ""
+            self.osc_on_cast_edit = ""
+            self.osc_after_cast_edit = ""
             self.controller.status = "OSC parameter edit cancelled."
             return
-        spell = self.controller.update_spell_osc_address(spell_id, self.osc_edit_value)
-        self.selected_spell_id = spell.id
-        self.osc_original_value = ""
 
     def _draw_voice_incantations(self, spell: Spell) -> None:
         from imgui_bundle import imgui
@@ -913,7 +948,7 @@ class DesktopVoiceUi:
         )
         self._draw_osc_help_parameter(
             f"{prefix}Spell<Name>",
-            "brief pulse when a spell is accepted; customizable on each spell page.",
+            "default bool spell pulse; each spell can use a custom bool or int signal.",
         )
         imgui.text_disabled("Inputs accepted from VRChat:")
         self._draw_osc_help_parameter(
@@ -1721,6 +1756,8 @@ def _osc_parameter_from_log(text: str) -> str | None:
     if end < 0:
         return None
     parameter = text[start:end].strip()
+    if "=" in parameter:
+        parameter = parameter.split("=", 1)[0].strip()
     return parameter or None
 
 
