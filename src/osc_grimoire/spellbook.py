@@ -11,7 +11,8 @@ from .paths import spell_samples_dir, spellbook_path
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PRESET_SPELL_NAMES = ("Alohomora", "Spongify", "Rictusempra", "Flipendo")
 
 
 @dataclass(frozen=True)
@@ -21,10 +22,9 @@ class Spell:
     enabled: bool = True
     has_gesture: bool = False
     has_voice: bool = True
-    voice_samples: tuple[str, ...] = ()
+    voice_aliases: tuple[str, ...] = ()
     gesture_samples: tuple[str, ...] = ()
     osc_address: str | None = None
-    intra_class_median: float | None = None
 
 
 @dataclass(frozen=True)
@@ -33,29 +33,48 @@ class Spellbook:
     spells: tuple[Spell, ...] = field(default_factory=tuple)
 
 
-def load_spellbook(data_dir: Path) -> Spellbook:
+def load_spellbook(data_dir: Path, *, seed_presets: bool = True) -> Spellbook:
     path = spellbook_path(data_dir)
     if not path.exists():
-        LOGGER.info("No spellbook at %s; starting empty.", path)
-        return Spellbook(data_dir=data_dir)
+        LOGGER.info("No spellbook at %s; starting with presets.", path)
+        return (
+            seeded_spellbook(data_dir) if seed_presets else Spellbook(data_dir=data_dir)
+        )
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         backup_path = _backup_corrupt_spellbook(path)
         LOGGER.exception(
-            "Could not parse spellbook at %s; moved it to %s and starting empty.",
+            "Could not parse spellbook at %s; moved it to %s and starting with presets.",
             path,
             backup_path,
         )
-        return Spellbook(data_dir=data_dir)
+        return (
+            seeded_spellbook(data_dir) if seed_presets else Spellbook(data_dir=data_dir)
+        )
     version = raw.get("version")
     if version != SCHEMA_VERSION:
         raise ValueError(
-            f"Unsupported spellbook version {version!r} (expected {SCHEMA_VERSION})"
+            f"Unsupported spellbook version {version!r} (expected {SCHEMA_VERSION}). "
+            "Reset or manually port the old data directory."
         )
 
     spells = tuple(_spell_from_json(entry) for entry in raw.get("spells", ()))
+    return Spellbook(data_dir=data_dir, spells=spells)
+
+
+def seeded_spellbook(data_dir: Path) -> Spellbook:
+    spells = tuple(
+        Spell(
+            id=f"preset_{name.lower()}",
+            name=name,
+            has_gesture=False,
+            has_voice=True,
+            voice_aliases=(name,),
+        )
+        for name in PRESET_SPELL_NAMES
+    )
     return Spellbook(data_dir=data_dir, spells=spells)
 
 
@@ -98,9 +117,10 @@ def find_spell_by_id(spellbook: Spellbook, spell_id: str) -> Spell | None:
 
 
 def create_spell(spellbook: Spellbook, name: str) -> tuple[Spellbook, Spell]:
-    if find_spell_by_name(spellbook, name) is not None:
-        raise ValueError(f"Spell named {name!r} already exists")
-    spell = Spell(id=uuid.uuid4().hex, name=name)
+    clean_name = normalize_voice_alias(name)
+    if find_spell_by_name(spellbook, clean_name) is not None:
+        raise ValueError(f"Spell named {clean_name!r} already exists")
+    spell = Spell(id=uuid.uuid4().hex, name=clean_name, voice_aliases=(clean_name,))
     return replace(spellbook, spells=(*spellbook.spells, spell)), spell
 
 
@@ -116,29 +136,49 @@ def delete_spell(spellbook: Spellbook, spell_id: str) -> Spellbook:
     )
 
 
-def add_voice_sample(
-    spellbook: Spellbook, spell: Spell, relative_path: str
-) -> Spellbook:
-    # Re-fetch by id so a stale `spell` value (with empty voice_samples)
-    # appends to the latest, not overwrites it.
+def add_voice_alias(spellbook: Spellbook, spell: Spell, alias: str) -> Spellbook:
     current = find_spell_by_id(spellbook, spell.id)
     if current is None:
         raise ValueError(f"Spell {spell.id!r} not in spellbook")
-    updated = replace(current, voice_samples=(*current.voice_samples, relative_path))
+    clean_alias = normalize_voice_alias(alias)
+    existing = {a.casefold() for a in current.voice_aliases}
+    if clean_alias.casefold() in existing:
+        raise ValueError(
+            f"Incantation {clean_alias!r} already exists for {current.name}"
+        )
+    updated = replace(current, voice_aliases=(*current.voice_aliases, clean_alias))
     return replace_spell(spellbook, updated)
 
 
-def remove_voice_sample(
-    spellbook: Spellbook, spell: Spell, relative_path: str
+def remove_voice_alias(spellbook: Spellbook, spell: Spell, alias: str) -> Spellbook:
+    current = find_spell_by_id(spellbook, spell.id)
+    if current is None:
+        raise ValueError(f"Spell {spell.id!r} not in spellbook")
+    clean_alias = normalize_voice_alias(alias)
+    updated = replace(
+        current,
+        voice_aliases=tuple(
+            a for a in current.voice_aliases if a.casefold() != clean_alias.casefold()
+        ),
+    )
+    return replace_spell(spellbook, updated)
+
+
+def replace_voice_aliases(
+    spellbook: Spellbook, spell: Spell, aliases: tuple[str, ...]
 ) -> Spellbook:
     current = find_spell_by_id(spellbook, spell.id)
     if current is None:
         raise ValueError(f"Spell {spell.id!r} not in spellbook")
-    updated = replace(
-        current,
-        voice_samples=tuple(p for p in current.voice_samples if p != relative_path),
-        intra_class_median=None,
-    )
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        clean_alias = normalize_voice_alias(alias)
+        key = clean_alias.casefold()
+        if key not in seen:
+            cleaned.append(clean_alias)
+            seen.add(key)
+    updated = replace(current, voice_aliases=tuple(cleaned))
     return replace_spell(spellbook, updated)
 
 
@@ -156,26 +196,8 @@ def set_gesture_sample(
     return replace_spell(spellbook, updated)
 
 
-def voice_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
-    return [spellbook.data_dir / rel for rel in spell.voice_samples]
-
-
 def gesture_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
     return [spellbook.data_dir / rel for rel in spell.gesture_samples]
-
-
-def next_voice_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
-    """Return (absolute_path, relative_path) for the next voice sample slot."""
-    samples_dir = spell_samples_dir(spellbook.data_dir, spell.id)
-    samples_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(samples_dir.glob("voice_*.wav"))
-    n = len(existing) + 1
-    while True:
-        candidate = samples_dir / f"voice_{n:03d}.wav"
-        if not candidate.exists():
-            relative = candidate.relative_to(spellbook.data_dir).as_posix()
-            return candidate, relative
-        n += 1
 
 
 def gesture_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
@@ -186,21 +208,32 @@ def gesture_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
     return candidate, relative
 
 
+def normalize_voice_alias(alias: str) -> str:
+    cleaned = " ".join(alias.strip().split())
+    if not cleaned:
+        raise ValueError("Incantation cannot be empty")
+    return cleaned
+
+
 def _spell_from_json(entry: dict) -> Spell:
     modalities = entry.get("modalities", {})
     samples = entry.get("samples", {})
     recognition = entry.get("recognition") or {}
     osc = entry.get("osc") or {}
+    aliases = tuple(
+        normalize_voice_alias(alias)
+        for alias in recognition.get("voice_aliases", ())
+        if str(alias).strip()
+    )
     return Spell(
         id=entry["id"],
         name=entry["name"],
         enabled=entry.get("enabled", True),
         has_gesture=bool(modalities.get("gesture", False)),
         has_voice=bool(modalities.get("voice", True)),
-        voice_samples=tuple(samples.get("voices", ())),
+        voice_aliases=aliases,
         gesture_samples=tuple(samples.get("gestures", ())),
         osc_address=osc.get("address"),
-        intra_class_median=recognition.get("intra_class_median"),
     )
 
 
@@ -215,10 +248,9 @@ def _spell_to_json(spell: Spell) -> dict:
         },
         "osc": ({"address": spell.osc_address} if spell.osc_address else None),
         "recognition": {
-            "intra_class_median": spell.intra_class_median,
+            "voice_aliases": list(spell.voice_aliases),
         },
         "samples": {
-            "voices": list(spell.voice_samples),
             "gestures": list(spell.gesture_samples),
         },
     }

@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from .voice_features import (
     resample_audio,
     trim_voice_audio,
 )
-from .voice_recognizer import VoiceTemplateBackend
+from .voice_recognizer import TextHypothesis, VoiceTemplateBackend
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +74,11 @@ def parakeet_ctc_forced_backend(
         ),
         distance=_ctc_forced_distance,
         aggregate=lambda distances: float(np.median(distances)),
+        tokenize_text=lambda text: parakeet_ctc_token_ids_for_text(text, repo_id),
+        distance_to_tokens=_ctc_forced_distance_to_tokens,
+        text_hypotheses=lambda feature, limit: ctc_text_hypotheses(
+            feature, repo_id=repo_id, limit=limit
+        ),
     )
 
 
@@ -90,6 +96,37 @@ def parakeet_ctc_token_labels(
     return labels
 
 
+def parakeet_ctc_token_ids_for_text(
+    text: str,
+    repo_id: str = DEFAULT_PARAKEET_CTC_REPO,
+) -> tuple[int, ...]:
+    cleaned = re.sub(r"[^0-9A-Za-z]+", " ", text).strip().lower()
+    if not cleaned:
+        raise ValueError("Incantation cannot be empty")
+    stream = "".join(f"\u2581{word}" for word in cleaned.split())
+    vocab = _parakeet_ctc_vocab(repo_id)
+    symbol_list: list[str] = []
+    for symbol in vocab:
+        if not (symbol.startswith("<") and symbol.endswith(">")):
+            symbol_list.append(symbol)
+    symbols: tuple[str, ...] = tuple(
+        sorted(symbol_list, key=lambda symbol: len(symbol), reverse=True)
+    )
+    token_ids: list[int] = []
+    index = 0
+    while index < len(stream):
+        match: str | None = None
+        for symbol in symbols:
+            if stream.startswith(symbol, index):
+                match = symbol
+                break
+        if match is None:
+            raise ValueError(f"Alias contains text outside Parakeet vocabulary: {text}")
+        token_ids.append(vocab[match])
+        index += len(match)
+    return tuple(token_ids)
+
+
 def transcribe_parakeet_ctc_name(
     audio: FloatArray,
     config: VoiceRecognitionConfig,
@@ -101,6 +138,40 @@ def transcribe_parakeet_ctc_name(
     return normalize_spoken_spell_name(
         ctc_token_ids_to_text(feature.token_ids, token_labels)
     )
+
+
+def ctc_text_hypotheses(
+    feature: CtcFeature,
+    *,
+    repo_id: str = DEFAULT_PARAKEET_CTC_REPO,
+    limit: int = 5,
+    beam_size: int = 8,
+    frame_top_k: int = 12,
+) -> tuple[TextHypothesis, ...]:
+    bundle = _load_parakeet_ctc_model(repo_id)
+    token_labels = parakeet_ctc_token_labels(repo_id)
+    beams = ctc_prefix_beam_search(
+        feature.log_probs,
+        blank_id=bundle.blank_id,
+        beam_size=beam_size,
+        frame_top_k=frame_top_k,
+    )
+    results: list[TextHypothesis] = []
+    seen: set[str] = set()
+    for token_ids, score in beams:
+        text = normalize_spoken_spell_name(
+            ctc_token_ids_to_text(token_ids, token_labels)
+        )
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(TextHypothesis(text=text, token_ids=token_ids, score=score))
+        if len(results) >= limit:
+            break
+    return tuple(results)
 
 
 def ctc_token_ids_to_text(
@@ -280,6 +351,19 @@ def _read_blank_id(tokens_path: Path) -> int:
     return max_id
 
 
+@functools.lru_cache(maxsize=2)
+def _parakeet_ctc_vocab(repo_id: str) -> dict[str, int]:
+    bundle = _load_parakeet_ctc_model(repo_id)
+    vocab: dict[str, int] = {}
+    for line in (
+        (bundle.model_dir / "vocab.txt").read_text(encoding="utf-8").splitlines()
+    ):
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            vocab[parts[0]] = int(parts[-1])
+    return vocab
+
+
 def _format_token(token_id: int, token_labels: dict[int, str]) -> str:
     token = token_labels.get(token_id, f"<{token_id}>")
     if token == "":
@@ -300,8 +384,16 @@ def ctc_greedy_token_ids(log_probs: FloatArray, blank_id: int) -> tuple[int, ...
 def _ctc_forced_distance(query: CtcFeature, template: CtcFeature) -> float:
     if not template.token_ids:
         return 1.0
-    score = ctc_sequence_log_probability(query.log_probs, template.token_ids)
-    normalized = score / max(len(template.token_ids), 1)
+    return _ctc_forced_distance_to_tokens(query, template.token_ids)
+
+
+def _ctc_forced_distance_to_tokens(
+    query: CtcFeature, token_ids: tuple[int, ...]
+) -> float:
+    if not token_ids:
+        return 1.0
+    score = ctc_sequence_log_probability(query.log_probs, token_ids)
+    normalized = score / max(len(token_ids), 1)
     return float(-normalized)
 
 
@@ -335,6 +427,81 @@ def ctc_sequence_log_probability(
         previous = current
 
     return _logsumexp([previous[-1], previous[-2]])
+
+
+def ctc_prefix_beam_search(
+    log_probs: FloatArray,
+    *,
+    blank_id: int | None = None,
+    beam_size: int = 8,
+    frame_top_k: int = 12,
+) -> tuple[tuple[tuple[int, ...], float], ...]:
+    if log_probs.ndim != 2:
+        raise ValueError("CTC log probabilities must be a 2-D array")
+    if blank_id is None:
+        blank_id = log_probs.shape[1] - 1
+    beam: dict[tuple[int, ...], tuple[float, float]] = {(): (0.0, -np.inf)}
+    for frame in range(log_probs.shape[0]):
+        frame_scores = log_probs[frame]
+        top_ids = np.argsort(frame_scores)[-frame_top_k:].astype(np.int64).tolist()
+        if blank_id not in top_ids:
+            top_ids.append(blank_id)
+        next_beam: dict[tuple[int, ...], tuple[float, float]] = defaultdict(
+            lambda: (-np.inf, -np.inf)
+        )
+        for prefix, (p_blank, p_nonblank) in beam.items():
+            for token_id in top_ids:
+                token_id = int(token_id)
+                token_score = float(frame_scores[token_id])
+                if token_id == blank_id:
+                    old_blank, old_nonblank = next_beam[prefix]
+                    next_beam[prefix] = (
+                        _logsumexp(
+                            [old_blank, p_blank + token_score, p_nonblank + token_score]
+                        ),
+                        old_nonblank,
+                    )
+                    continue
+
+                end_token = prefix[-1] if prefix else None
+                extended = prefix + (token_id,)
+                if token_id == end_token:
+                    old_blank, old_nonblank = next_beam[prefix]
+                    next_beam[prefix] = (
+                        old_blank,
+                        _logsumexp([old_nonblank, p_nonblank + token_score]),
+                    )
+                    old_blank, old_nonblank = next_beam[extended]
+                    next_beam[extended] = (
+                        old_blank,
+                        _logsumexp([old_nonblank, p_blank + token_score]),
+                    )
+                else:
+                    old_blank, old_nonblank = next_beam[extended]
+                    next_beam[extended] = (
+                        old_blank,
+                        _logsumexp(
+                            [
+                                old_nonblank,
+                                p_blank + token_score,
+                                p_nonblank + token_score,
+                            ]
+                        ),
+                    )
+        ranked = sorted(
+            next_beam.items(),
+            key=lambda item: _logsumexp([item[1][0], item[1][1]]),
+            reverse=True,
+        )
+        beam = dict(ranked[:beam_size])
+    return tuple(
+        (prefix, _logsumexp([p_blank, p_nonblank]))
+        for prefix, (p_blank, p_nonblank) in sorted(
+            beam.items(),
+            key=lambda item: _logsumexp([item[1][0], item[1][1]]),
+            reverse=True,
+        )
+    )
 
 
 def _ctc_extended_labels(token_ids: tuple[int, ...], blank_id: int) -> tuple[int, ...]:

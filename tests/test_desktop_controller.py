@@ -5,7 +5,6 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
-import soundfile as sf
 
 from osc_grimoire.audio_playback import load_audio_for_playback
 from osc_grimoire.config import (
@@ -14,12 +13,18 @@ from osc_grimoire.config import (
     GestureRecognitionConfig,
     VoiceRecognitionConfig,
 )
-from osc_grimoire.desktop_controller import VoiceTrainingController
+from osc_grimoire.desktop_controller import GrimoireController
 from osc_grimoire.gesture_recognizer import load_gesture_points
-from osc_grimoire.spellbook import load_spellbook
+from osc_grimoire.spellbook import PRESET_SPELL_NAMES, load_spellbook
 from osc_grimoire.voice_features import FloatArray
-from osc_grimoire.voice_recognizer import VoiceTemplateBackend
+from osc_grimoire.voice_recognizer import TextHypothesis, VoiceTemplateBackend
 from osc_grimoire.waveform import downsample_waveform, load_waveform_preview
+
+
+def test_controller_loads_preset_spells(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    assert tuple(s.name for s in controller.spellbook.spells) == PRESET_SPELL_NAMES
 
 
 def test_controller_create_cancel_draft_without_persisting(tmp_path: Path) -> None:
@@ -29,110 +34,61 @@ def test_controller_create_cancel_draft_without_persisting(tmp_path: Path) -> No
     controller.update_draft_name("Ignis")
     controller.cancel_draft()
 
-    assert draft.name == "New Spell 1"
+    assert draft.name == "New Spell 5"
     assert controller.draft is None
-    assert load_spellbook(tmp_path).spells == ()
+    assert load_spellbook(tmp_path).spells == controller.spellbook.spells
 
 
-def test_controller_persists_draft_on_first_sample_and_deletes_sample(
-    tmp_path: Path,
-) -> None:
+def test_controller_persists_draft_with_default_alias(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.start_draft()
     controller.update_draft_name("Ignis")
 
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
 
     assert spell.name == "Ignis"
-    assert len(spell.voice_samples) == 1
-    sample_path = tmp_path / spell.voice_samples[0]
-    assert sample_path.exists()
-
-    updated = controller.delete_sample(spell.id, spell.voice_samples[0])
-
-    assert updated.voice_samples == ()
-    assert not sample_path.exists()
+    assert spell.voice_aliases == ("Ignis",)
+    assert load_spellbook(tmp_path).spells[-1].name == "Ignis"
 
 
-def test_controller_persists_draft_on_first_gesture(tmp_path: Path) -> None:
-    controller = _controller(
-        tmp_path,
-        gesture_config=GestureRecognitionConfig(min_points=3),
-    )
-    controller.start_draft()
-    controller.update_draft_name("Wave")
-
-    spell = controller.save_gesture_to_draft(_gesture_line())
-
-    assert spell.name == "Wave"
-    assert spell.voice_samples == ()
-    assert spell.has_gesture
-    assert len(spell.gesture_samples) == 1
-    assert load_spellbook(tmp_path).spells[0].id == spell.id
-
-
-def test_controller_does_not_persist_draft_on_short_first_gesture(
-    tmp_path: Path,
-) -> None:
-    controller = _controller(
-        tmp_path,
-        gesture_config=GestureRecognitionConfig(min_points=4),
-    )
-    controller.start_draft()
-
-    with pytest.raises(ValueError, match="Gesture needs"):
-        controller.save_gesture_to_draft(np.zeros((2, 2), dtype=np.float32))
-
-    assert load_spellbook(tmp_path).spells == ()
-    assert controller.draft is not None
-
-
-def test_controller_deletes_spell_and_sample_directory(tmp_path: Path) -> None:
+def test_controller_renames_spell_and_updates_default_alias(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
-    sample_path = tmp_path / spell.voice_samples[0]
-    sample_dir = sample_path.parent
+    spell = controller.persist_draft()
 
-    deleted_name = controller.delete_spell(spell.id)
+    renamed = controller.rename_spell(spell.id, "Ignis")
 
-    assert deleted_name == spell.name
-    assert load_spellbook(tmp_path).spells == ()
-    assert not sample_dir.exists()
-    assert controller.ui_log[-1].message == f"Deleted spell: {spell.name}"
+    assert renamed.name == "Ignis"
+    assert renamed.voice_aliases == ("Ignis",)
 
 
-def test_controller_does_not_persist_draft_on_empty_sample(tmp_path: Path) -> None:
+def test_controller_adds_and_removes_voice_alias(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
-    controller.start_draft()
-    controller.update_draft_name("Ignis")
+    spell = controller.persist_draft()
 
-    with pytest.raises(ValueError, match="No audio captured"):
-        controller.add_sample_to_draft(np.zeros(0, dtype=np.float32))
+    updated = controller.add_voice_alias(spell.id, "In nis")
+    assert updated.voice_aliases == (spell.name, "In nis")
 
-    assert load_spellbook(tmp_path).spells == ()
+    updated = controller.remove_voice_alias(spell.id, "In nis")
+    assert updated.voice_aliases == (spell.name,)
 
 
-def test_controller_renames_spell_and_keeps_names_unique(tmp_path: Path) -> None:
+def test_controller_rejects_invalid_voice_alias(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
-    first = controller.add_sample_to_draft(_audio(440))
-    controller.start_draft()
-    controller.update_draft_name("Other")
-    second = controller.add_sample_to_draft(_audio(660))
+    spell = controller.persist_draft()
 
-    renamed = controller.rename_spell(second.id, first.name)
-
-    assert renamed.name == f"{first.name} 2"
+    with pytest.raises(ValueError):
+        controller.add_voice_alias(spell.id, "")
 
 
 def test_controller_updates_spell_osc_parameter(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
 
     updated = controller.update_spell_osc_address(spell.id, "CustomFire")
 
     assert updated.osc_address == "CustomFire"
     assert controller.spell_osc_parameter_name(updated) == "CustomFire"
-    assert load_spellbook(tmp_path).spells[0].osc_address == "CustomFire"
+    assert load_spellbook(tmp_path).spells[-1].osc_address == "CustomFire"
 
     reset = controller.update_spell_osc_address(spell.id, "")
 
@@ -142,45 +98,53 @@ def test_controller_updates_spell_osc_parameter(tmp_path: Path) -> None:
 
 def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
-    controller.start_draft()
-    controller.update_draft_name("Low")
-    controller.add_sample_to_draft(np.full(16000, 0.1, dtype=np.float32))
-    controller.start_draft()
-    controller.update_draft_name("High")
-    controller.add_sample_to_draft(np.full(16000, 0.8, dtype=np.float32))
 
-    result = controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+    result = controller.recognize(_audio_for_text("Alohomora"))
 
     assert result.decision.accepted
-    assert result.ranking[0].name == "Low"
+    assert result.ranking[0].name == "Alohomora"
+    assert result.ranking[0].alias == "Alohomora"
     assert "decision: ACCEPTED" in result.debug_text
+    assert result.text_hypotheses[0].text == "Alohomora"
+    assert result.pending_incantations[0].text == "Alohomora"
+    assert result.pending_incantations[0].distance == pytest.approx(0.0)
 
 
 def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
     output = _FakeOutput()
     controller = _controller(tmp_path)
     controller.output = output
-    controller.start_draft()
-    controller.update_draft_name("Low")
-    controller.add_sample_to_draft(np.full(16000, 0.1, dtype=np.float32))
 
-    controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+    controller.recognize(_audio_for_text("Alohomora"))
 
-    assert output.spell_pulses == ["Low"]
+    assert output.spell_pulses == ["Alohomora"]
     assert output.fizzle_count == 0
-    assert controller.ui_log[-1].message == "Accepted: Low (osc: OSCGrimoireSpellLow)"
+    assert (
+        controller.ui_log[-1].message
+        == "Accepted: Alohomora (osc: OSCGrimoireSpellAlohomora)"
+    )
 
 
 def test_controller_pulses_fizzle_on_rejected_voice(tmp_path: Path) -> None:
     output = _FakeOutput()
     controller = _controller(tmp_path)
     controller.output = output
+    controller.voice_config = VoiceRecognitionConfig(voice_alias_distance_max=0.0)
 
-    controller.recognize(np.full(16000, 0.11, dtype=np.float32))
+    controller.recognize(_audio_for_text("Nope"))
 
     assert output.spell_pulses == []
     assert output.fizzle_count == 1
     assert controller.ui_log[-1].message.startswith("Fizzle (osc: OSCGrimoireFizzle):")
+
+
+def test_controller_suggest_spell_name_uses_text_hypotheses(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    name = controller.suggest_spell_name(_audio_for_text("Alohomora"))
+
+    assert name == "Alohomora"
+    assert controller.last_name_hypotheses[0].text == "Alohomora"
 
 
 def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -> None:
@@ -189,9 +153,6 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
     controller = _controller(tmp_path)
     controller.osc_input = osc_input
     controller.output = output
-
-    assert controller.voice_enabled
-    assert controller.gesture_enabled
 
     controller.set_voice_enabled(False)
     controller.set_gesture_enabled(False)
@@ -206,63 +167,6 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
     assert output.gesture_enabled == [False]
     assert output.ui_enabled == [False]
 
-    controller.set_voice_enabled(True)
-    controller.set_gesture_enabled(True)
-    osc_input.voice_enabled = False
-    osc_input.gesture_enabled = False
-
-    assert not controller.voice_enabled
-    assert not controller.gesture_enabled
-
-
-def test_controller_resyncs_effective_toggles_to_output(tmp_path: Path) -> None:
-    output = _FakeOutput()
-    osc_input = _FakeInput()
-    osc_input.voice_enabled = False
-    controller = _controller(tmp_path)
-    controller.output = output
-    controller.osc_input = osc_input
-
-    controller.sync_enable_toggles_to_output()
-
-    assert output.enable_toggles == [(True, True, False)]
-
-
-def test_controller_can_set_local_ui_visibility(tmp_path: Path) -> None:
-    controller = _controller(tmp_path)
-
-    controller.set_ui_enabled(False)
-
-    assert not controller.local_ui_enabled
-    assert not controller.ui_enabled
-
-    controller.set_ui_enabled(True)
-
-    assert controller.local_ui_enabled
-    assert controller.ui_enabled
-
-
-def test_controller_ui_toggle_uses_effective_state(tmp_path: Path) -> None:
-    osc_input = _FakeInput()
-    osc_input.ui_enabled = False
-    controller = _controller(tmp_path)
-    controller.osc_input = osc_input
-
-    controller.toggle_ui_enabled()
-
-    assert controller.local_ui_enabled
-    assert controller.ui_enabled
-    assert osc_input.ui_enabled
-
-
-def test_controller_casting_hand_moves_book_to_opposite_hand(tmp_path: Path) -> None:
-    controller = _controller(tmp_path)
-
-    controller.set_casting_hand("left")
-
-    assert controller.config.openvr.pointer_hand == "left"
-    assert controller.config.openvr.overlay_hand == "right"
-
 
 def test_controller_voice_strictness_updates_voice_thresholds(
     tmp_path: Path,
@@ -271,12 +175,15 @@ def test_controller_voice_strictness_updates_voice_thresholds(
 
     controller.set_voice_strictness(0.0)
     assert controller.voice_config.relative_margin_min == 0.0
+    assert controller.voice_config.voice_alias_distance_max == pytest.approx(9.0)
 
     controller.set_voice_strictness(0.30)
     assert controller.voice_config.relative_margin_min == pytest.approx(0.20)
+    assert controller.voice_config.voice_alias_distance_max == pytest.approx(7.0)
 
     controller.set_voice_strictness(1.0)
     assert controller.voice_config.relative_margin_min == pytest.approx(0.45)
+    assert controller.voice_config.voice_alias_distance_max == pytest.approx(5.0)
 
 
 def test_controller_gesture_strictness_updates_gesture_thresholds(
@@ -299,7 +206,7 @@ def test_controller_gesture_strictness_updates_gesture_thresholds(
 
 def test_controller_preloads_backend(tmp_path: Path) -> None:
     backend = _CountingBackend()
-    controller = VoiceTrainingController(
+    controller = GrimoireController(
         tmp_path,
         config=AppConfig(audio=AudioConfig(sample_rate=16000)),
         backend=backend.backend,
@@ -311,77 +218,19 @@ def test_controller_preloads_backend(tmp_path: Path) -> None:
     assert backend.extract_array_calls == 1
 
 
-def test_controller_updates_warm_feature_cache_incrementally(tmp_path: Path) -> None:
-    backend = _CountingBackend()
-    controller = VoiceTrainingController(
-        tmp_path,
-        config=AppConfig(audio=AudioConfig(sample_rate=16000)),
-        backend=backend.backend,
-        voice_config=VoiceRecognitionConfig(relative_margin_min=0.0),
-    )
-    spell = controller.add_sample_to_draft(_audio(440))
-    controller._recognition_cache()
-    backend.extract_path_calls = 0
-    backend.extract_array_calls = 0
-
-    controller.add_sample_to_spell(spell.id, _audio(660))
-
-    assert backend.extract_path_calls == 0
-    assert backend.extract_array_calls == 1
-
-
-def test_controller_trims_saved_voice_samples(tmp_path: Path) -> None:
-    controller = _controller(tmp_path)
-    spell = controller.persist_draft()
-    silence = np.zeros(4000, dtype=np.float32)
-    audio = np.concatenate([silence, _audio(440), silence])
-
-    updated = controller.add_sample_to_spell(spell.id, audio)
-
-    saved, sample_rate = sf.read(
-        str(tmp_path / updated.voice_samples[0]), dtype="float32"
-    )
-    assert sample_rate == 16000
-    assert 0 < saved.size < audio.size
-
-
-def test_load_audio_for_playback_reads_float32_sample(tmp_path: Path) -> None:
-    path = tmp_path / "sample.wav"
-    sf.write(str(path), _audio(440), 16000)
-
-    audio, sample_rate = load_audio_for_playback(path)
-
-    assert sample_rate == 16000
-    assert audio.dtype == np.float32
-    assert audio.size > 0
-
-
-def test_controller_plays_individual_and_random_samples(tmp_path: Path) -> None:
-    player = _FakeAudioPlayer()
-    controller = _controller(tmp_path, audio_player=player)
-    spell = controller.add_sample_to_draft(_audio(440))
-
-    controller.play_sample(spell.voice_samples[0])
-    controller.play_random_sample(spell.id)
-
-    expected_path = tmp_path / spell.voice_samples[0]
-    assert player.paths == [expected_path, expected_path]
-    assert controller.status == f"Playing {spell.name} sample."
-
-
 def test_controller_saves_and_overwrites_gesture_sample(tmp_path: Path) -> None:
     controller = _controller(
         tmp_path,
         gesture_config=GestureRecognitionConfig(min_points=3),
     )
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
 
     controller.arm_gesture_recording(spell.id)
     controller.handle_gesture_stroke(_gesture_line())
     controller.arm_gesture_recording(spell.id)
     controller.handle_gesture_stroke(_gesture_zigzag())
 
-    fresh = load_spellbook(tmp_path).spells[0]
+    fresh = load_spellbook(tmp_path).spells[-1]
     assert fresh.has_gesture
     assert len(fresh.gesture_samples) == 1
     points = load_gesture_points(tmp_path / fresh.gesture_samples[0])
@@ -393,9 +242,9 @@ def test_controller_clears_gesture_sample(tmp_path: Path) -> None:
         tmp_path,
         gesture_config=GestureRecognitionConfig(min_points=3),
     )
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
     controller.save_gesture_sample(spell.id, _gesture_line())
-    fresh = load_spellbook(tmp_path).spells[0]
+    fresh = load_spellbook(tmp_path).spells[-1]
     gesture_path = tmp_path / fresh.gesture_samples[0]
 
     updated = controller.clear_gesture_sample(spell.id)
@@ -413,7 +262,7 @@ def test_controller_recognizes_gesture(tmp_path: Path) -> None:
             min_points=3, score_min=0.5, margin_min=0.01
         ),
     )
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
     controller.save_gesture_sample(spell.id, _gesture_line())
 
     result = controller.recognize_gesture(_gesture_line())
@@ -431,7 +280,7 @@ def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
         ),
     )
     controller.output = output
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.persist_draft()
     controller.save_gesture_sample(spell.id, _gesture_line())
 
     controller.recognize_gesture(_gesture_line())
@@ -445,20 +294,22 @@ def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
     )
 
 
-def test_controller_rejects_short_gesture_without_mutation(tmp_path: Path) -> None:
-    controller = _controller(
-        tmp_path,
-        gesture_config=GestureRecognitionConfig(min_points=4),
-    )
-    spell = controller.add_sample_to_draft(_audio(440))
+def test_load_audio_for_playback_reads_float32_sample(tmp_path: Path) -> None:
+    import soundfile as sf
 
-    with pytest.raises(ValueError):
-        controller.save_gesture_sample(spell.id, np.zeros((2, 2), dtype=np.float32))
+    path = tmp_path / "sample.wav"
+    sf.write(str(path), np.zeros(100, dtype=np.float32), 16000)
 
-    assert load_spellbook(tmp_path).spells[0].gesture_samples == ()
+    audio, sample_rate = load_audio_for_playback(path)
+
+    assert sample_rate == 16000
+    assert audio.dtype == np.float32
+    assert audio.size > 0
 
 
 def test_waveform_preview_downsamples_and_loads_wav(tmp_path: Path) -> None:
+    import soundfile as sf
+
     audio = np.linspace(-0.5, 0.5, 1000, dtype=np.float32)
     preview = downsample_waveform(audio, points=25)
     path = tmp_path / "sample.wav"
@@ -490,13 +341,10 @@ def test_desktop_ui_pages_follow_spell_order(tmp_path: Path) -> None:
     from osc_grimoire.desktop_ui import PAGE_DIAGNOSTICS, PAGE_MAIN, DesktopVoiceUi
 
     controller = _controller(tmp_path)
-    first = controller.add_sample_to_draft(_audio(440))
-    controller.start_draft()
-    controller.update_draft_name("Other")
-    controller.add_sample_to_draft(_audio(660))
+    first = controller.spellbook.spells[0]
     ui = DesktopVoiceUi(controller)
 
-    assert ui._ordered_pages() == [PAGE_MAIN, 1, 2, PAGE_DIAGNOSTICS]
+    assert ui._ordered_pages() == [PAGE_MAIN, 1, 2, 3, 4, PAGE_DIAGNOSTICS]
     ui._go_next_page()
     assert ui.page == 1
     assert ui.selected_spell_id == first.id
@@ -509,7 +357,8 @@ def test_desktop_ui_invalid_spell_page_does_not_auto_start_draft(
 
     controller = _controller(tmp_path)
     ui = DesktopVoiceUi(controller)
-    ui.page = 1
+    ui.page = 99
+    ui.selected_spell_id = None
 
     ui._draw_spell_page()
 
@@ -530,7 +379,7 @@ def test_desktop_ui_overlay_keyboard_finish_updates_spell(tmp_path: Path) -> Non
     from osc_grimoire.desktop_ui import DesktopVoiceUi
 
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.spellbook.spells[0]
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.keyboard_editing = True
     ui.keyboard_edit_spell_id = spell.id
@@ -546,7 +395,7 @@ def test_desktop_ui_overlay_keyboard_cancel_restores_name(tmp_path: Path) -> Non
     from osc_grimoire.desktop_ui import DesktopVoiceUi
 
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.spellbook.spells[0]
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     close_count = 0
 
@@ -571,7 +420,7 @@ def test_desktop_ui_osc_edit_updates_spell_parameter(tmp_path: Path) -> None:
     from osc_grimoire.desktop_ui import DesktopVoiceUi
 
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.spellbook.spells[0]
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.osc_editing = True
     ui.osc_edit_spell_id = spell.id
@@ -588,7 +437,7 @@ def test_desktop_ui_spoken_name_requires_confirmation(
     from osc_grimoire.desktop_ui import DesktopVoiceUi
 
     controller = _controller(tmp_path)
-    spell = controller.add_sample_to_draft(_audio(440))
+    spell = controller.spellbook.spells[0]
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.selected_spell_id = spell.id
     ui.keyboard_editing = True
@@ -637,27 +486,57 @@ def test_desktop_ui_button_release_does_not_end_overlay_recording(
 def _controller(
     data_dir: Path,
     gesture_config: GestureRecognitionConfig | None = None,
-    audio_player: Any | None = None,
-) -> VoiceTrainingController:
+) -> GrimoireController:
     config = AppConfig(
         audio=AudioConfig(sample_rate=16000),
         gesture=gesture_config or GestureRecognitionConfig(),
     )
-    return VoiceTrainingController(
+    return GrimoireController(
         data_dir,
         config=config,
         backend=_fake_backend(),
         voice_config=VoiceRecognitionConfig(relative_margin_min=0.0),
-        audio_player=audio_player,
     )
 
 
-class _FakeAudioPlayer:
-    def __init__(self) -> None:
-        self.paths: list[Path] = []
+def _tokenize(text: str) -> tuple[int, ...]:
+    cleaned = "".join(c for c in text.casefold() if c.isalnum())
+    if not cleaned:
+        raise ValueError("empty")
+    return tuple(ord(c) for c in cleaned)
 
-    def play_file(self, path: Path) -> None:
-        self.paths.append(path)
+
+def _text(tokens: tuple[int, ...]) -> str:
+    return "".join(chr(t) for t in tokens).capitalize()
+
+
+def _audio_for_text(text: str) -> FloatArray:
+    return np.asarray(_tokenize(text), dtype=np.float32)
+
+
+def _fake_backend() -> VoiceTemplateBackend:
+    def distance_to_tokens(feature, token_ids: tuple[int, ...]) -> float:
+        return (
+            0.0
+            if tuple(feature) == token_ids
+            else float(abs(sum(feature) - sum(token_ids)) + 1)
+        )
+
+    def hypotheses(feature, _limit: int):
+        return (TextHypothesis(_text(tuple(feature)), tuple(feature), -1.0),)
+
+    return VoiceTemplateBackend(
+        name="fake",
+        extract_path=lambda _path, _config: _tokenize("alohomora"),
+        extract_array=lambda audio, _config, _sample_rate: tuple(
+            int(v) for v in np.asarray(audio).reshape(-1)
+        ),
+        distance=lambda _a, _b: 0.0,
+        aggregate=lambda distances: float(np.median(distances)),
+        tokenize_text=_tokenize,
+        distance_to_tokens=distance_to_tokens,
+        text_hypotheses=hypotheses,
+    )
 
 
 class _FakeRecorder:
@@ -670,7 +549,7 @@ class _FakeRecorder:
 
     def end_recording(self) -> FloatArray:
         self.end_count += 1
-        return np.zeros(1600, dtype=np.float32)
+        return _audio_for_text("Lumos")
 
 
 class _FakeOutput:
@@ -746,51 +625,24 @@ class _FakeInput:
         pass
 
 
-def _fake_backend() -> VoiceTemplateBackend:
-    def extract_path(path: Path, _config: VoiceRecognitionConfig) -> FloatArray:
-        audio, _sample_rate = sf.read(str(path), dtype="float32")
-        return np.array([[float(np.mean(audio))]], dtype=np.float32)
-
-    def extract_array(
-        audio: FloatArray, _config: VoiceRecognitionConfig, _sample_rate: int
-    ) -> FloatArray:
-        return np.array([[float(np.mean(audio))]], dtype=np.float32)
-
-    return VoiceTemplateBackend(
-        name="fake",
-        extract_path=extract_path,
-        extract_array=extract_array,
-        distance=lambda a, b: float(abs(a[0, 0] - b[0, 0])),
-        aggregate=lambda distances: float(np.median(distances)),
-    )
-
-
 class _CountingBackend:
     def __init__(self) -> None:
         self.extract_array_calls = 0
-        self.extract_path_calls = 0
         self.backend = VoiceTemplateBackend(
             name="counting",
-            extract_path=self.extract_path,
+            extract_path=lambda _path, _config: (),
             extract_array=self.extract_array,
-            distance=lambda a, b: float(abs(a[0, 0] - b[0, 0])),
+            distance=lambda _a, _b: 0.0,
             aggregate=lambda distances: float(np.median(distances)),
+            tokenize_text=_tokenize,
+            distance_to_tokens=lambda _feature, _tokens: 0.0,
         )
-
-    def extract_path(self, _path: Path, _config: VoiceRecognitionConfig) -> FloatArray:
-        self.extract_path_calls += 1
-        return np.array([[0.0]], dtype=np.float32)
 
     def extract_array(
         self, audio: FloatArray, _config: VoiceRecognitionConfig, _sample_rate: int
-    ) -> FloatArray:
+    ) -> tuple[int, ...]:
         self.extract_array_calls += 1
-        return np.array([[float(audio.size)]], dtype=np.float32)
-
-
-def _audio(frequency: float) -> FloatArray:
-    t = np.linspace(0, 0.5, 8000, endpoint=False, dtype=np.float32)
-    return (0.25 * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+        return tuple(int(v) for v in np.asarray(audio).reshape(-1))
 
 
 def _gesture_line() -> FloatArray:

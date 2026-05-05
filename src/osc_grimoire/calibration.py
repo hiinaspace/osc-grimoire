@@ -8,13 +8,12 @@ from pathlib import Path
 from .config import VoiceRecognitionConfig
 from .spellbook import Spellbook
 from .voice_recognizer import (
-    BackendStats,
-    VoiceFeature,
+    TextHypothesis,
     VoiceTemplateBackend,
-    compute_backend_stats,
     decide,
     default_voice_backend,
     rank_spells,
+    text_hypotheses,
 )
 
 METADATA_FILENAME = "calibration.json"
@@ -36,11 +35,13 @@ class ExampleDiagnosis:
     example: CalibrationExample
     best_spell_id: str | None
     best_spell_name: str | None
+    best_alias: str | None
     accepted: bool
     correct: bool | None
-    intra_ratio: float | None
+    best_distance: float | None
     margin_ratio: float | None
     reason: str
+    text_hypotheses: tuple[TextHypothesis, ...] = ()
     extraction_seconds: float = 0.0
     peak_rss_mb: float | None = None
 
@@ -160,18 +161,8 @@ def diagnose_calibration_session(
     examples = load_calibration_examples(session_dir)
     spellbook = _spellbook_for_calibration_examples(spellbook, examples)
     peak_rss_mb = _current_rss_mb()
-    backend_stats, feature_cache = compute_backend_stats(spellbook, config, backend)
-    peak_rss_mb = _max_optional(peak_rss_mb, _current_rss_mb())
     diagnoses = tuple(
-        _diagnose_example(
-            example,
-            spellbook,
-            config,
-            backend,
-            backend_stats,
-            feature_cache,
-        )
-        for example in examples
+        _diagnose_example(example, spellbook, config, backend) for example in examples
     )
     peak_rss_mb = _max_optional(
         peak_rss_mb,
@@ -190,8 +181,7 @@ def diagnose_calibration_session(
         examples=diagnoses,
         sweep=sweep,
         recommended_margin_min=recommended,
-        extraction_seconds=backend_stats.extraction_seconds
-        + sum(d.extraction_seconds for d in diagnoses),
+        extraction_seconds=sum(d.extraction_seconds for d in diagnoses),
         peak_rss_mb=peak_rss_mb,
     )
 
@@ -219,20 +209,11 @@ def _diagnose_example(
     spellbook: Spellbook,
     config: VoiceRecognitionConfig,
     backend: VoiceTemplateBackend,
-    backend_stats: BackendStats,
-    feature_cache: dict[Path, VoiceFeature],
 ) -> ExampleDiagnosis:
     start = time.perf_counter()
     query = backend.extract_path(example.path, config)
     extraction_seconds = time.perf_counter() - start
-    ranking = rank_spells(
-        query,
-        spellbook,
-        config,
-        feature_cache,
-        backend=backend,
-        backend_stats=backend_stats,
-    )
+    ranking = rank_spells(query, spellbook, config, backend=backend)
     decision = decide(ranking, config)
     best = ranking[0] if ranking else None
     correct: bool | None
@@ -244,11 +225,13 @@ def _diagnose_example(
         example=example,
         best_spell_id=best.spell_id if best is not None else None,
         best_spell_name=best.name if best is not None else None,
+        best_alias=best.alias if best is not None else None,
         accepted=decision.accepted,
         correct=correct,
-        intra_ratio=decision.intra_ratio,
+        best_distance=decision.best_distance,
         margin_ratio=decision.margin_ratio,
         reason=decision.reason,
+        text_hypotheses=text_hypotheses(query, backend),
         extraction_seconds=extraction_seconds,
         peak_rss_mb=_current_rss_mb(),
     )
@@ -272,10 +255,9 @@ def _sweep_threshold(
         if diagnosis.example.kind == "positive":
             positive_total += 1
             if diagnosis.example.variant_name is not None:
-                variant = variant_counts.setdefault(
-                    diagnosis.example.variant_name, [0, 0, 0]
-                )
-                variant[0] += 1
+                variant_counts.setdefault(diagnosis.example.variant_name, [0, 0, 0])[
+                    0
+                ] += 1
             if accepted:
                 positive_accepted += 1
                 if diagnosis.correct:
@@ -313,9 +295,9 @@ def _sweep_threshold(
 def _accepted_under(
     diagnosis: ExampleDiagnosis, config: VoiceRecognitionConfig
 ) -> bool:
-    if diagnosis.intra_ratio is None:
+    if diagnosis.best_distance is None:
         return False
-    if diagnosis.intra_ratio > config.intra_class_ratio_max:
+    if diagnosis.best_distance > config.voice_alias_distance_max:
         return False
     if (
         diagnosis.margin_ratio is not None

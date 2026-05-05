@@ -17,7 +17,7 @@ from typing import Any, cast
 import numpy as np
 
 from .config import AppConfig, OpenVrOverlayConfig
-from .desktop_controller import VoiceTrainingController
+from .desktop_controller import GrimoireController
 from .desktop_ui import DesktopVoiceUi
 from .gesture_capture import GestureStrokeSampler
 from .osc_input import OscInputService
@@ -259,7 +259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = AppConfig()
     osc_output = OscOutput(config.osc)
     osc_input = OscInputService(config.osc)
-    controller = VoiceTrainingController(
+    controller = GrimoireController(
         data_dir, config=config, output=osc_output, osc_input=osc_input
     )
     osc_input.on_avatar_change = controller.sync_enable_toggles_to_output

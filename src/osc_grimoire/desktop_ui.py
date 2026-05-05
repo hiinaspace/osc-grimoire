@@ -12,10 +12,9 @@ import numpy as np
 
 from .audio_capture import NonBlockingAudioRecorder
 from .desktop_controller import (
-    DEFAULT_SAMPLE_TARGET,
     GestureResult,
+    GrimoireController,
     RecognitionResult,
-    VoiceTrainingController,
 )
 from .gesture_recognizer import GestureRanking
 from .osc_input import OscInputService
@@ -33,7 +32,7 @@ PAGE_DIAGNOSTICS = -1
 class DesktopVoiceUi:
     def __init__(
         self,
-        controller: VoiceTrainingController,
+        controller: GrimoireController,
         *,
         overlay_mode: bool = False,
         surface_size: tuple[int, int] = (1000, 760),
@@ -50,7 +49,8 @@ class DesktopVoiceUi:
         self.recording_source: str | None = None
         self.recorder: NonBlockingAudioRecorder | None = None
         self.recorder_error: str | None = None
-        self.waveform_cache: dict[tuple[str, int], FloatArray] = {}
+        self.alias_edit_spell_id: str | None = None
+        self.alias_edit_value = ""
         self.keyboard_request_handler: Callable[[str | None, str, str], bool] | None = (
             None
         )
@@ -216,11 +216,8 @@ class DesktopVoiceUi:
     def _draw_main_empty_state(self) -> None:
         from imgui_bundle import imgui
 
-        imgui.text("No spells are trained yet.")
-        imgui.text_disabled("Add a spell, then train:")
-        imgui.bullet_text("Voice-only: record spoken samples.")
-        imgui.bullet_text("Gesture-only: record a wand motion.")
-        imgui.bullet_text("Both: train voice and gesture.")
+        imgui.text("No spells yet.")
+        imgui.text_disabled("Add a spell, then define incantations or a gesture.")
 
     def _draw_spell_summary_table(self) -> None:
         from imgui_bundle import imgui
@@ -246,9 +243,6 @@ class DesktopVoiceUi:
             )
             if imgui.is_item_clicked():
                 self._open_spell_page(spell)
-            imgui.same_line()
-            if imgui.button("Play"):
-                self._play_random_sample(spell)
             imgui.table_next_column()
             clicked, _selected = imgui.selectable(
                 f"{spell.name}##row",
@@ -364,9 +358,9 @@ class DesktopVoiceUi:
         self._draw_spell_controls(spell)
         spell = self._selected_spell()
         if spell is not None:
-            self._draw_samples(spell)
+            self._draw_voice_incantations(spell)
         elif self.controller.draft is not None:
-            self._draw_draft_sample_controls()
+            self._draw_draft_voice_controls()
         imgui.table_next_column()
         if spell is not None:
             self._draw_saved_gesture_section(spell)
@@ -412,12 +406,6 @@ class DesktopVoiceUi:
             self._draw_delete_spell_controls(spell)
 
         spell = self._selected_spell()
-        sample_count = len(spell.voice_samples) if spell is not None else 0
-        imgui.progress_bar(
-            min(sample_count / DEFAULT_SAMPLE_TARGET, 1.0),
-            imgui.ImVec2(360, 0),
-            f"{sample_count}/{DEFAULT_SAMPLE_TARGET} samples",
-        )
         if spell is not None:
             self._draw_spell_osc_controls(spell)
 
@@ -474,6 +462,13 @@ class DesktopVoiceUi:
             self.pending_spoken_name = None
             self.pending_spoken_name_spell_id = None
             self.controller.status = "Spoken name discarded."
+        for hypothesis in self.controller.last_name_hypotheses[1:5]:
+            if imgui.small_button(f"Use {hypothesis.text}"):
+                self.edit_name = hypothesis.text
+                if not self.keyboard_editing:
+                    self._apply_spell_name(target_spell_id, hypothesis.text)
+                self.pending_spoken_name = None
+                self.pending_spoken_name_spell_id = None
 
     def _request_keyboard_rename(self, target_spell_id: str | None) -> None:
         if self.keyboard_request_handler is None:
@@ -597,93 +592,181 @@ class DesktopVoiceUi:
         self.selected_spell_id = spell.id
         self.osc_original_value = ""
 
-    def _draw_samples(self, spell: Spell) -> None:
+    def _draw_voice_incantations(self, spell: Spell) -> None:
         from imgui_bundle import imgui
 
         imgui.separator()
-        imgui.text("Samples")
+        imgui.text("Incantations")
         imgui.same_line()
         self._hold_button(
-            "Record Sample",
-            "sample",
+            "Test Incantation",
+            "test",
             allow_space=False,
-            size=(150, 0),
+            size=(160, 0),
         )
-        if not self.overlay_mode:
-            imgui.same_line()
-            self._hold_button(
-                "Hold to Recognize",
-                "test",
-                allow_space=False,
-                size=(170, 0),
+        if spell.voice_aliases or self._pending_incantations_for_spell(spell):
+            self._draw_incantation_score_table(spell)
+        if spell.voice_aliases:
+            imgui.text_disabled("Speak any of these to cast this spell.")
+        else:
+            imgui.text_disabled(
+                "Add some incantations to activate this spell with your voice."
             )
-        previews = self._sample_previews(spell)
-        available_width = imgui.get_content_region_avail().x
-        columns = max(1, min(3, int(available_width // 190)))
-        table_flags = (
-            imgui.TableFlags_.sizing_stretch_same | imgui.TableFlags_.no_saved_settings
-        )
-        if not imgui.begin_table("##sample_grid", columns, table_flags):
-            return
-        for index, relative_path in enumerate(spell.voice_samples):
-            if index % columns == 0:
-                imgui.table_next_row()
-            imgui.table_next_column()
-            imgui.push_id(str(index))
-            if imgui.button("Play"):
-                self._play_sample(relative_path)
+            if imgui.button("Add spell name as incantation"):
+                self._add_alias_from_text(spell, spell.name)
+        if self.alias_edit_spell_id != spell.id:
+            self.alias_edit_spell_id = spell.id
+            self.alias_edit_value = ""
+        self._draw_add_incantation_controls(spell)
+
+    def _draw_add_incantation_controls(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text_disabled("New incantation")
+        button_label = "Add Incantation"
+        button_width = imgui.calc_text_size(button_label).x + 26.0
+        spacing = imgui.get_style().item_spacing.x
+        available = imgui.get_content_region_avail().x
+        room_for_inline_button = available >= button_width + 170.0 + spacing
+        if room_for_inline_button:
+            imgui.set_next_item_width(max(150.0, available - button_width - spacing))
+        else:
+            imgui.set_next_item_width(max(120.0, available))
+        changed, value = imgui.input_text("##new_incantation", self.alias_edit_value)
+        if changed:
+            self.alias_edit_value = value
+        if room_for_inline_button:
             imgui.same_line()
-            if imgui.button("X"):
-                self.controller.delete_sample(spell.id, relative_path)
-                self.waveform_cache.clear()
-                imgui.pop_id()
-                break
-            if index < len(previews):
-                graph_width = max(110.0, imgui.get_content_region_avail().x - 6.0)
-                imgui.plot_lines(
-                    "##wave",
-                    previews[index],
-                    graph_size=imgui.ImVec2(graph_width, 34),
-                    scale_min=-1.0,
-                    scale_max=1.0,
+        if imgui.button("Add Incantation"):
+            self._add_alias_from_text(spell, self.alias_edit_value)
+
+    def _draw_incantation_score_table(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        result = (
+            self.controller.last_result
+            if self.controller.last_match_kind == "voice"
+            else None
+        )
+        row = _voice_ranking_for_spell(result, spell.id) if result is not None else None
+        pending = self._pending_incantations_for_spell(spell)
+        table_flags = (
+            imgui.TableFlags_.sizing_stretch_prop
+            | imgui.TableFlags_.row_bg
+            | imgui.TableFlags_.borders_inner_h
+            | imgui.TableFlags_.no_saved_settings
+        )
+        if not imgui.begin_table("##incantations", 3, table_flags):
+            return
+        available = imgui.get_content_region_avail().x
+        score_width = min(210.0, max(140.0, available * 0.36))
+        action_width = min(160.0, max(36.0, available * 0.30))
+        imgui.table_setup_column("Incantation", imgui.TableColumnFlags_.width_stretch)
+        imgui.table_setup_column(
+            "Score", imgui.TableColumnFlags_.width_fixed, score_width
+        )
+        imgui.table_setup_column(
+            "Action", imgui.TableColumnFlags_.width_fixed, action_width
+        )
+        for incantation in spell.voice_aliases:
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(incantation)
+            imgui.table_next_column()
+            alias_row = (
+                _voice_alias_ranking_for_incantation(row, incantation)
+                if row is not None
+                else None
+            )
+            if result is not None and row is not None and alias_row is not None:
+                self._draw_threshold_bar(
+                    _voice_distance_score(result, alias_row.distance),
+                    0.0,
+                    label="score",
+                    show_marker=False,
+                    state=_voice_incantation_state(result, row, incantation),
+                    size=(score_width - 8.0, 14),
                 )
+            else:
+                imgui.text_disabled("not tested")
+            imgui.table_next_column()
+            imgui.push_id(f"incantation_{incantation}")
+            if imgui.small_button("X"):
+                try:
+                    self.controller.remove_voice_alias(spell.id, incantation)
+                except ValueError as exc:
+                    self.controller.status = str(exc)
+                imgui.pop_id()
+                imgui.end_table()
+                return
+            imgui.pop_id()
+        existing = {alias.casefold() for alias in spell.voice_aliases}
+        for pending_row in pending:
+            if pending_row.text.casefold() in existing:
+                continue
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text(pending_row.text)
+            imgui.same_line()
+            imgui.text_disabled("heard")
+            imgui.table_next_column()
+            if result is not None:
+                self._draw_threshold_bar(
+                    _voice_distance_score(result, pending_row.distance),
+                    0.0,
+                    label="score",
+                    show_marker=False,
+                    state="normal",
+                    size=(score_width - 8.0, 14),
+                )
+            else:
+                imgui.text_disabled("not tested")
+            imgui.table_next_column()
+            imgui.push_id(f"pending_incantation_{pending_row.text}")
+            add_label = (
+                "Add as incantation"
+                if action_width >= imgui.calc_text_size("Add as incantation").x + 18.0
+                else "Add"
+            )
+            if imgui.small_button(add_label):
+                self._add_alias_from_text(spell, pending_row.text)
+            if add_label == "Add" and imgui.is_item_hovered():
+                imgui.set_tooltip("Add as incantation")
             imgui.pop_id()
         imgui.end_table()
 
-    def _play_sample(self, relative_path: str) -> None:
-        try:
-            self.controller.play_sample(relative_path)
-        except Exception as exc:
-            LOGGER.exception("Audio playback failed")
-            self.controller.status = f"Playback failed: {exc}"
+    def _pending_incantations_for_spell(self, spell: Spell):
+        result = (
+            self.controller.last_result
+            if self.controller.last_match_kind == "voice"
+            else None
+        )
+        if result is None:
+            return ()
+        existing = {alias.casefold() for alias in spell.voice_aliases}
+        return tuple(
+            row
+            for row in result.pending_incantations
+            if row.text.casefold() not in existing
+        )
 
-    def _play_random_sample(self, spell: Spell) -> None:
-        try:
-            self.controller.play_random_sample(spell.id)
-        except Exception as exc:
-            LOGGER.exception("Audio playback failed")
-            self.controller.status = f"Playback failed: {exc}"
-
-    def _draw_draft_sample_controls(self) -> None:
+    def _draw_draft_voice_controls(self) -> None:
         from imgui_bundle import imgui
 
         imgui.separator()
-        imgui.text("Samples")
-        imgui.same_line()
-        self._hold_button(
-            "Record First Sample",
-            "sample",
-            allow_space=False,
-            size=(190, 0),
-        )
+        imgui.text("Voice")
         imgui.text_wrapped(
-            "Record a voice sample to create a voice spell. Aim for a normal, "
-            "repeatable pronunciation; you can add more samples after it is created."
+            "The spell name becomes the first incantation. Use Speak Name if you "
+            "want to fill the name from a pronunciation."
         )
-        imgui.bullet_text("Use 5-10 samples if recognition feels unreliable.")
-        imgui.bullet_text(
-            "Vary pace and volume a little, but keep the same incantation."
-        )
+        self._hold_button("Speak Name", "name", allow_space=False, size=(130, 0))
+
+    def _add_alias_from_text(self, spell: Spell, alias: str) -> None:
+        try:
+            self.controller.add_voice_alias(spell.id, alias)
+            self.alias_edit_value = ""
+        except ValueError as exc:
+            self.controller.status = str(exc)
 
     def _draw_draft_gesture_guidance(self) -> None:
         from imgui_bundle import imgui
@@ -697,7 +780,7 @@ class DesktopVoiceUi:
             )
         imgui.text_wrapped(
             "Record a gesture to create a gesture spell. One clear, repeatable "
-            "stroke is enough to start; you can add voice samples later if wanted."
+            "stroke is enough to start; incantations are based on the spell name."
         )
 
     def _draw_saved_gesture_section(self, spell: Spell) -> None:
@@ -750,7 +833,6 @@ class DesktopVoiceUi:
             )
             self.edit_name = ""
             self.page = PAGE_MAIN
-            self.waveform_cache.clear()
         imgui.same_line()
         if imgui.button("Cancel Delete"):
             self.delete_confirm_spell_id = None
@@ -1236,16 +1318,7 @@ class DesktopVoiceUi:
                     spell.id if spell is not None else None
                 )
             return
-        if mode == "sample":
-            spell = self._selected_spell()
-            if spell is None:
-                spell = self.controller.add_sample_to_draft(audio)
-                self.selected_spell_id = spell.id
-                self.edit_name = spell.name
-                self.page = self._page_for_spell_id(spell.id)
-            else:
-                self.controller.add_sample_to_spell(spell.id, audio)
-            self.waveform_cache.clear()
+        raise ValueError(f"Unknown recording mode {mode!r}")
 
     def _ensure_recorder(self) -> NonBlockingAudioRecorder | None:
         if self.recorder is not None:
@@ -1281,8 +1354,6 @@ class DesktopVoiceUi:
         if self.recording_mode is not None:
             if self.recording_mode == "recognize":
                 return "voice: recording"
-            if self.recording_mode == "sample":
-                return "sample: recording"
             if self.recording_mode == "name":
                 return "name: recording"
             return f"{self.recording_mode}: recording"
@@ -1368,25 +1439,6 @@ class DesktopVoiceUi:
                 return index
         return PAGE_MAIN
 
-    def _sample_previews(self, spell: Spell) -> list[FloatArray]:
-        previews: list[FloatArray] = []
-        for relative_path in spell.voice_samples:
-            cache_key = (relative_path, 160)
-            if cache_key not in self.waveform_cache:
-                path = self.controller.data_dir / relative_path
-                if path.exists():
-                    self.waveform_cache[cache_key] = self.controller.sample_previews(
-                        Spell(
-                            id=spell.id,
-                            name=spell.name,
-                            voice_samples=(relative_path,),
-                        )
-                    )[0]
-                else:
-                    self.waveform_cache[cache_key] = np.zeros(160, dtype=np.float32)
-            previews.append(self.waveform_cache[cache_key])
-        return previews
-
     def _draw_gesture_preview(
         self,
         label: str,
@@ -1464,7 +1516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
-    controller = VoiceTrainingController(data_dir)
+    controller = GrimoireController(data_dir)
     osc_output = OscOutput(controller.config.osc)
     controller.output = osc_output
     osc_input = OscInputService(controller.config.osc)
@@ -1576,18 +1628,41 @@ def _voice_ranking_for_spell(result: RecognitionResult, spell_id: str):
     return None
 
 
+def _voice_alias_ranking_for_incantation(row, incantation: str):
+    for alias_row in row.alias_rankings:
+        if alias_row.alias.casefold() == incantation.casefold():
+            return alias_row
+    return None
+
+
 def _voice_match_score(result: RecognitionResult, row) -> float:
-    if not result.ranking:
-        return 0.0
-    best_distance = max(result.ranking[0].aggregate_distance, 1e-6)
-    return min(best_distance / max(row.aggregate_distance, 1e-6), 1.0)
+    return _voice_distance_score(result, row.aggregate_distance)
+
+
+def _voice_distance_score(result: RecognitionResult, distance: float) -> float:
+    distance_max = max(result.decision.distance_max, 1e-6)
+    return max(0.0, min(1.0, 1.0 - distance / distance_max))
+
+
+def _voice_incantation_state(
+    result: RecognitionResult,
+    row,
+    incantation: str,
+) -> str:
+    if result.decision.accepted:
+        if row == result.ranking[0] and row.alias.casefold() == incantation.casefold():
+            return "accepted"
+        return "muted"
+    if _voice_margin_conflict(result, row.spell_id):
+        return "conflict"
+    return "rejected"
 
 
 def _voice_low_confidence(result: RecognitionResult) -> bool:
     decision = result.decision
     return (
-        decision.intra_ratio is not None
-        and decision.intra_ratio > decision.intra_ratio_max
+        decision.best_distance is not None
+        and decision.best_distance > decision.distance_max
     )
 
 

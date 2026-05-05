@@ -20,29 +20,37 @@ If SteamVR is already running, OSC Grimoire opens both a desktop control window
 and a VR spellbook overlay floating over your off-hand (left by default). You can click buttons with the right controller as laser pointer.
 
 If SteamVR is not running, it starts in desktop-only
-mode so you can train/test voice without booting VR. press `Start Overlay`
+mode so you can test voice without booting VR. Press `Start Overlay`
 when you want to bring up SteamVR.
 
-### 2. Add a spell
+### 2. Use or add a spell
 
-Click `Add Spell`. A new draft spell page opens. The default name is
-`New Spell N`; you can rename it now or after training.
+New spellbooks start with `Alohomora`, `Spongify`, `Rictusempra`, and
+`Flipendo` so sample avatars can work immediately.
+
+Click `Add Spell` to define another spell. A new draft spell page opens. The
+default name is `New Spell N`; rename it to the spell name you want to display
+and emit over OSC.
 
 ![new spell page](docs/newspell.png)
 
-### 3. Train the voice incantation
+### 3. Tune the incantations
 
-Hold `Record First Sample` and say the spell clearly. Release the button when
-you finish speaking. After the first sample, the draft becomes a saved spell.
+Voice recognition is text-first. A spell name is the display/OSC name; its
+incantations are the phrases you can speak to cast that spell.
 
-Record several more samples with `Record Sample`. Five to ten samples is a good
-starting point. Keep the word mostly consistent, but vary your pace and volume a
-little so recognition is not too brittle.
+Use `Test Incantation` on the spell page to try one. The incantation table shows
+scores for saved incantations and likely heard phrases. Add a heard phrase as an
+incantation if it consistently scores better for your pronunciation.
 
-Use `Hold to Recognize` on the desktop spell page to test the incantation
-without entering VR.
+A spell with no incantations will not match voice input. Use `Add spell name as
+incantation`, type a phrase, or add one from a heard phrase row to make it
+voice-castable.
 
-![new spell with samples](docs/newspellfilled.png)
+Use `Speak Name` when editing a spell name if you want to fill it from your
+pronunciation.
+
+![new spell with incantations](docs/newspellfilled.png)
 
 ### 4. Train the wand gesture
 
@@ -110,8 +118,8 @@ Open `Settings`. The `Voice` and `Gesture` sliders move from `Lenient` to
 
 The defaults are intentionally somewhat lenient so the system feels responsive.
 
-If the recognition is still too hard at low strictness, you may just have to
-record more samples and/or choose a different spell word.
+If the recognition is still too hard at low strictness, add an incantation from
+the heard phrase list or choose a more distinct spell word.
 
 ![settings](docs/settings.png)
 
@@ -133,16 +141,17 @@ appears on the opposite hand.
 
 ### Can I use only voice or only gesture?
 
-Yes. A spell can have voice samples, a gesture, or both. Train only the parts you
-want. Use `Clear Gesture` to remove a gesture from an existing spell.
+Yes. A spell can have incantations, a gesture, or both. Use `Clear Gesture` to
+remove a gesture from an existing spell.
 
 ### Why did my spell fizzle?
 
 A fizzle means the latest voice or gesture attempt did not pass the current
 thresholds. Common fixes:
 
-- Add more voice samples for the same spell.
-- Re-record unclear or inconsistent samples.
+- Add a clearer alternate spelling or phrase as an incantation.
+- Add an incantation from the heard phrase list.
+- Edit the spell name if the written form does not match your pronunciation.
 - Make gestures more distinct from each other.
 - Move the relevant strictness slider slightly toward `Lenient`.
 
@@ -157,13 +166,28 @@ uv run osc-grimoire-overlay --data-dir ./data
 
 ### Can you share spellbooks?
 
-In theory you can copy and paste the data directory from somebody else. I'm not sure how well the voice samples generalize though; it's probably faster to re-record them yourself.
+In theory you can copy and paste the data directory from somebody else.
+Incantations are text, so they should share better across different voices.
 
 ### How does the recognition work?
 
-The voice recognition uses the [`entropora/parakeet-ctc-110m-int8`](https://huggingface.co/entropora/parakeet-ctc-110m-int8) ASR model. However, instead of using its final transcription verbatim and matching text, we match against audio samples you record.
+The voice recognition uses the [`entropora/parakeet-ctc-110m-int8`](https://huggingface.co/entropora/parakeet-ctc-110m-int8) ASR model.
 
-For each sample, the model produces frame-by-frame CTC token probabilities, and the app collapses those into a token sequence for that sample. When you speak a query, the app scores how likely the query's CTC probabilities are to emit each recorded sample's token sequence, allowing CTC's timing-flexible alignment. The spell whose samples score best wins, subject to the strictness thresholds. This seems to work more robustly for the out-of-distribution nonsense words you'd want for spells, where exact transcription text can be too sensitive to alternate renderings like "aloha mora" for "alohomora". See [the investigation notes](./docs/INVESTIGATION.md) for more details on how I got here.
+Each incantation is tokenized with Parakeet's `vocab.txt`. When you speak, the
+app turns the audio into CTC token log probabilities, then forced-scores every
+enabled incantation against that query. Lower distance means the audio is more
+likely to emit that exact token sequence.
+
+For each spell, the best-scoring incantation becomes that spell's voice score.
+The app accepts the best spell only if:
+
+- its best incantation distance is under the current absolute threshold; and
+- it is far enough ahead of the second-best spell by relative margin.
+
+The `Voice` strictness slider adjusts both gates. The spell page also shows top
+CTC phrase hypotheses from the same query audio as pending incantations, with the
+score they would get if added. See [the investigation notes](./docs/INVESTIGATION.md)
+for more detail.
 
 The gesture recognition is the [$Q recognizer](https://depts.washington.edu/acelab/proj/dollar/qdollar.html) on a projected version of your controller position.
 

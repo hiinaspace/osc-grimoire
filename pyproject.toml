@@ -27,7 +27,6 @@ dependencies = [
 ]
 
 [project.scripts]
-osc-grimoire = "osc_grimoire:main"
 osc-grimoire-ui = "osc_grimoire.desktop_ui:main"
 osc-grimoire-overlay = "osc_grimoire.openvr_overlay:main"
 

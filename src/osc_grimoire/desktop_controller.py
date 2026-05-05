@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 import shutil
 from collections import deque
 from dataclasses import dataclass, replace
@@ -9,9 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-import soundfile as sf
 
-from .audio_playback import AudioPlayer, SoundDeviceAudioPlayer
 from .config import AppConfig, VoiceRecognitionConfig
 from .gesture_recognizer import (
     GestureDecision,
@@ -25,43 +22,37 @@ from .osc_output import fizzle_osc_parameter_name, spell_osc_parameter_name
 from .paths import spell_samples_dir
 from .spellbook import (
     Spell,
-    Spellbook,
-    add_voice_sample,
+    add_voice_alias,
     create_spell,
     delete_spell,
     find_spell_by_id,
     gesture_sample_path,
     load_spellbook,
-    next_voice_sample_path,
-    remove_voice_sample,
+    normalize_voice_alias,
+    remove_voice_alias,
     replace_spell,
     save_spellbook,
     set_gesture_sample,
-    voice_sample_abs_paths,
 )
-from .voice_features import FloatArray, trim_voice_audio
+from .voice_features import FloatArray
 from .voice_recognizer import (
-    BackendStats,
     Decision,
     SpellRanking,
-    VoiceFeature,
+    TextHypothesis,
     VoiceTemplateBackend,
-    compute_backend_stats,
-    compute_intra_class_median,
     decide,
     default_voice_backend,
     rank_spells,
-    recompute_spell_voice_stats,
+    text_hypotheses,
 )
-from .waveform import load_waveform_preview
 
-DEFAULT_SAMPLE_TARGET = 10
 PARAKEET_CTC_RELATIVE_MARGIN_MIN = 0.20
 DEFAULT_RECOGNITION_STRICTNESS = 0.30
 LENIENT_VOICE_MARGIN_MIN = 0.0
 STRICT_VOICE_MARGIN_MIN = 0.45
-LENIENT_VOICE_INTRA_RATIO_MAX = 999.0
-STRICT_VOICE_INTRA_RATIO_MAX = 1.15
+LENIENT_VOICE_ALIAS_DISTANCE_MAX = 9.0
+DEFAULT_VOICE_ALIAS_DISTANCE_MAX = 7.0
+STRICT_VOICE_ALIAS_DISTANCE_MAX = 5.0
 LENIENT_GESTURE_SCORE_MIN = 0.0
 STRICT_GESTURE_SCORE_MIN = 0.70
 DEFAULT_GESTURE_SCORE_MIN = 0.20
@@ -122,7 +113,17 @@ class DraftSpell:
 class RecognitionResult:
     ranking: tuple[SpellRanking, ...]
     decision: Decision
+    text_hypotheses: tuple[TextHypothesis, ...]
+    pending_incantations: tuple[PendingIncantation, ...]
     debug_text: str
+
+
+@dataclass(frozen=True)
+class PendingIncantation:
+    text: str
+    distance: float
+    token_ids: tuple[int, ...]
+    hypothesis_score: float
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,7 @@ class UiLogEntry:
         return f"[{self.timestamp:%H:%M:%S}] {self.message}"
 
 
-class VoiceTrainingController:
+class GrimoireController:
     def __init__(
         self,
         data_dir: Path,
@@ -150,17 +151,17 @@ class VoiceTrainingController:
         voice_config: VoiceRecognitionConfig | None = None,
         output: OutputSink | None = None,
         osc_input: InputSink | None = None,
-        audio_player: AudioPlayer | None = None,
     ) -> None:
         self.data_dir = data_dir
         self.config = config or AppConfig()
         self.voice_config = voice_config or replace(
-            self.config.voice, relative_margin_min=PARAKEET_CTC_RELATIVE_MARGIN_MIN
+            self.config.voice,
+            relative_margin_min=PARAKEET_CTC_RELATIVE_MARGIN_MIN,
+            voice_alias_distance_max=DEFAULT_VOICE_ALIAS_DISTANCE_MAX,
         )
         self.backend = backend or default_voice_backend()
         self.output = output
         self.osc_input = osc_input
-        self.audio_player = audio_player or SoundDeviceAudioPlayer()
         self.local_ui_enabled = True
         self.local_gesture_enabled = True
         self.local_voice_enabled = True
@@ -170,13 +171,12 @@ class VoiceTrainingController:
         self.draft: DraftSpell | None = None
         self.status = "Ready."
         self.last_result: RecognitionResult | None = None
+        self.last_name_hypotheses: tuple[TextHypothesis, ...] = ()
         self.last_gesture_result: GestureResult | None = None
         self.last_match_kind: str | None = None
         self.latest_gesture_points: FloatArray | None = None
         self.armed_gesture_spell_id: str | None = None
         self.ui_log: deque[UiLogEntry] = deque(maxlen=12)
-        self._backend_stats: BackendStats | None = None
-        self._feature_cache: dict[Path, VoiceFeature] | None = None
 
     @property
     def output_status(self) -> str | None:
@@ -265,11 +265,11 @@ class VoiceTrainingController:
                 PARAKEET_CTC_RELATIVE_MARGIN_MIN,
                 STRICT_VOICE_MARGIN_MIN,
             ),
-            intra_class_ratio_max=_strictness_value(
+            voice_alias_distance_max=_strictness_value(
                 value,
-                LENIENT_VOICE_INTRA_RATIO_MAX,
-                self.config.voice.intra_class_ratio_max,
-                STRICT_VOICE_INTRA_RATIO_MAX,
+                LENIENT_VOICE_ALIAS_DISTANCE_MAX,
+                DEFAULT_VOICE_ALIAS_DISTANCE_MAX,
+                STRICT_VOICE_ALIAS_DISTANCE_MAX,
             ),
         )
         self.status = "Voice tuning updated."
@@ -323,19 +323,13 @@ class VoiceTrainingController:
             self.output.pulse_fizzle()
 
     def preload_backend(self) -> None:
-        # Force lazy model load before the UI appears so the first recording action
-        # does not hitch on Hugging Face metadata/model loading. Then warm the
-        # spellbook feature cache so the first test/recognize action only needs
-        # to extract the new query audio.
         silence = np.zeros(self.config.audio.sample_rate, dtype=np.float32)
         self.backend.extract_array(
             silence, self.voice_config, self.config.audio.sample_rate
         )
-        self._recognition_cache()
 
     def reload(self) -> None:
         self.spellbook = load_spellbook(self.data_dir)
-        self._invalidate_recognition_cache()
 
     def start_draft(self) -> DraftSpell:
         self.draft = DraftSpell(name=self.next_default_spell_name())
@@ -357,6 +351,7 @@ class VoiceTrainingController:
             self.start_draft()
         assert self.draft is not None
         name = self._unique_spell_name(self.draft.name.strip() or "New Spell")
+        self._validate_voice_alias(name)
         self.spellbook, spell = create_spell(self.spellbook, name)
         save_spellbook(self.spellbook)
         self.draft = None
@@ -365,14 +360,35 @@ class VoiceTrainingController:
 
     def rename_spell(self, spell_id: str, name: str) -> Spell:
         spell = self._spell_or_raise(spell_id)
-        clean_name = name.strip()
-        if not clean_name:
-            raise ValueError("Spell name cannot be empty")
-        updated = replace(spell, name=self._unique_spell_name(clean_name, spell.id))
+        clean_name = normalize_voice_alias(name)
+        unique_name = self._unique_spell_name(clean_name, spell.id)
+        self._validate_voice_alias(unique_name)
+        aliases = spell.voice_aliases
+        if aliases == (spell.name,) or not aliases:
+            aliases = (unique_name,)
+        updated = replace(spell, name=unique_name, voice_aliases=aliases)
         self.spellbook = replace_spell(self.spellbook, updated)
         save_spellbook(self.spellbook)
         self.status = f"Renamed spell to {updated.name}."
         return updated
+
+    def add_voice_alias(self, spell_id: str, alias: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        clean_alias = normalize_voice_alias(alias)
+        self._validate_voice_alias(clean_alias)
+        self.spellbook = add_voice_alias(self.spellbook, spell, clean_alias)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.status = f"Added incantation {clean_alias}."
+        return fresh
+
+    def remove_voice_alias(self, spell_id: str, alias: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        self.spellbook = remove_voice_alias(self.spellbook, spell, alias)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.status = f"Removed incantation from {fresh.name}."
+        return fresh
 
     def update_spell_osc_address(self, spell_id: str, value: str) -> Spell:
         spell = self._spell_or_raise(spell_id)
@@ -391,37 +407,15 @@ class VoiceTrainingController:
     def suggest_spell_name(self, audio: FloatArray) -> str:
         if audio.size == 0:
             raise ValueError("No audio captured")
-        from .parakeet_ctc_backends import transcribe_parakeet_ctc_name
-
-        name = transcribe_parakeet_ctc_name(
+        query = self.backend.extract_array(
             audio, self.voice_config, self.config.audio.sample_rate
         )
-        if not name:
+        self.last_name_hypotheses = text_hypotheses(query, self.backend)
+        if not self.last_name_hypotheses:
             raise ValueError("No spoken name detected")
+        name = self.last_name_hypotheses[0].text
         self.status = f"Heard spell name: {name}."
         return name
-
-    def add_sample_to_spell(self, spell_id: str, audio: FloatArray) -> Spell:
-        spell = self._spell_or_raise(spell_id)
-        if audio.size == 0:
-            raise ValueError("No audio captured")
-        audio = trim_voice_audio(audio, self.voice_config)
-        path, relative_path = next_voice_sample_path(self.spellbook, spell)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(path), audio, self.config.audio.sample_rate)
-        self.spellbook = add_voice_sample(self.spellbook, spell, relative_path)
-        self.spellbook = self._recompute_spell(spell.id)
-        save_spellbook(self.spellbook)
-        self._update_recognition_cache_after_add(path, audio)
-        fresh = self._spell_or_raise(spell.id)
-        self.status = f"Saved sample {len(fresh.voice_samples)}/{DEFAULT_SAMPLE_TARGET} for {fresh.name}."
-        return fresh
-
-    def add_sample_to_draft(self, audio: FloatArray) -> Spell:
-        if audio.size == 0:
-            raise ValueError("No audio captured")
-        spell = self.persist_draft()
-        return self.add_sample_to_spell(spell.id, audio)
 
     def save_gesture_to_draft(self, points: FloatArray) -> Spell:
         points = np.asarray(points, dtype=np.float32).reshape(-1, 2)
@@ -432,32 +426,6 @@ class VoiceTrainingController:
         spell = self.persist_draft()
         return self.save_gesture_sample(spell.id, points)
 
-    def delete_sample(self, spell_id: str, relative_path: str) -> Spell:
-        spell = self._spell_or_raise(spell_id)
-        self.spellbook = remove_voice_sample(self.spellbook, spell, relative_path)
-        path = self.data_dir / relative_path
-        if path.exists():
-            path.unlink()
-        self.spellbook = self._recompute_spell(spell.id)
-        save_spellbook(self.spellbook)
-        self._update_recognition_cache_after_delete(path)
-        fresh = self._spell_or_raise(spell.id)
-        self.status = f"Deleted sample from {fresh.name}."
-        return fresh
-
-    def play_sample(self, relative_path: str) -> None:
-        path = self.data_dir / relative_path
-        self.audio_player.play_file(path)
-        self.status = "Playing sample."
-
-    def play_random_sample(self, spell_id: str) -> None:
-        spell = self._spell_or_raise(spell_id)
-        if not spell.voice_samples:
-            raise ValueError(f"{spell.name} has no voice samples")
-        relative_path = random.choice(spell.voice_samples)
-        self.audio_player.play_file(self.data_dir / relative_path)
-        self.status = f"Playing {spell.name} sample."
-
     def delete_spell(self, spell_id: str) -> str:
         spell = self._spell_or_raise(spell_id)
         samples_dir = spell_samples_dir(self.data_dir, spell.id)
@@ -465,7 +433,6 @@ class VoiceTrainingController:
             shutil.rmtree(samples_dir)
         self.spellbook = delete_spell(self.spellbook, spell.id)
         save_spellbook(self.spellbook)
-        self._invalidate_recognition_cache()
         self.last_result = None
         self.last_gesture_result = None
         self.last_match_kind = None
@@ -568,7 +535,6 @@ class VoiceTrainingController:
     def recognize(self, audio: FloatArray) -> RecognitionResult:
         if audio.size == 0:
             raise ValueError("No audio captured")
-        backend_stats, feature_cache = self._recognition_cache()
         query = self.backend.extract_array(
             audio, self.voice_config, self.config.audio.sample_rate
         )
@@ -577,16 +543,20 @@ class VoiceTrainingController:
                 query,
                 self.spellbook,
                 self.voice_config,
-                feature_cache,
                 backend=self.backend,
-                backend_stats=backend_stats,
             )
         )
         decision = decide(list(ranking), self.voice_config)
+        hypotheses = text_hypotheses(query, self.backend)
+        pending_incantations = _score_pending_incantations(
+            query, hypotheses, self.backend
+        )
         result = RecognitionResult(
             ranking=ranking,
             decision=decision,
-            debug_text=format_recognition_debug(ranking, decision),
+            text_hypotheses=hypotheses,
+            pending_incantations=pending_incantations,
+            debug_text=format_recognition_debug(ranking, decision, hypotheses),
         )
         self.last_result = result
         self.last_match_kind = "voice"
@@ -605,15 +575,6 @@ class VoiceTrainingController:
         self._emit_recognition_result(result)
         return result
 
-    def sample_previews(self, spell: Spell, points: int = 160) -> list[FloatArray]:
-        previews: list[FloatArray] = []
-        for path in voice_sample_abs_paths(self.spellbook, spell):
-            if path.exists():
-                previews.append(load_waveform_preview(path, points))
-            else:
-                previews.append(np.zeros(points, dtype=np.float32))
-        return previews
-
     def gesture_preview(self, spell: Spell) -> FloatArray | None:
         return gesture_preview_points(self.spellbook, spell, self.config.gesture)
 
@@ -624,53 +585,6 @@ class VoiceTrainingController:
             if all(s.name.casefold() != name.casefold() for s in self.spellbook.spells):
                 return name
             index += 1
-
-    def _recompute_spell(self, spell_id: str) -> Spellbook:
-        spell = self._spell_or_raise(spell_id)
-        return recompute_spell_voice_stats(self.spellbook, spell, self.config.voice)
-
-    def _recognition_cache(self) -> tuple[BackendStats, dict[Path, VoiceFeature]]:
-        if self._backend_stats is None or self._feature_cache is None:
-            self._backend_stats, self._feature_cache = compute_backend_stats(
-                self.spellbook, self.voice_config, self.backend
-            )
-        return self._backend_stats, self._feature_cache
-
-    def _update_recognition_cache_after_add(
-        self, path: Path, audio: FloatArray
-    ) -> None:
-        if self._feature_cache is None:
-            return
-        self._feature_cache[path] = self.backend.extract_array(
-            audio, self.voice_config, self.config.audio.sample_rate
-        )
-        self._refresh_backend_stats_from_cache()
-
-    def _update_recognition_cache_after_delete(self, path: Path) -> None:
-        if self._feature_cache is None:
-            return
-        self._feature_cache.pop(path, None)
-        self._refresh_backend_stats_from_cache()
-
-    def _refresh_backend_stats_from_cache(self) -> None:
-        assert self._feature_cache is not None
-        intra_class_medians: dict[str, float | None] = {}
-        for spell in self.spellbook.spells:
-            if not spell.has_voice or not spell.voice_samples:
-                continue
-            features = [
-                self._feature_cache[path]
-                for path in voice_sample_abs_paths(self.spellbook, spell)
-                if path in self._feature_cache
-            ]
-            intra_class_medians[spell.id] = compute_intra_class_median(
-                features, self.backend
-            )
-        self._backend_stats = BackendStats(intra_class_medians, 0.0)
-
-    def _invalidate_recognition_cache(self) -> None:
-        self._backend_stats = None
-        self._feature_cache = None
 
     def _emit_recognition_result(self, result: RecognitionResult) -> None:
         if self.output is None:
@@ -694,6 +608,11 @@ class VoiceTrainingController:
             raise ValueError(f"Spell {spell_id!r} not found")
         return spell
 
+    def _validate_voice_alias(self, alias: str) -> None:
+        if self.backend.tokenize_text is None:
+            return
+        self.backend.tokenize_text(alias)
+
     def _unique_spell_name(self, name: str, current_spell_id: str | None = None) -> str:
         existing = {
             s.name.casefold() for s in self.spellbook.spells if s.id != current_spell_id
@@ -707,25 +626,21 @@ class VoiceTrainingController:
 
 
 def format_recognition_debug(
-    ranking: tuple[SpellRanking, ...], decision: Decision
+    ranking: tuple[SpellRanking, ...],
+    decision: Decision,
+    hypotheses: tuple[TextHypothesis, ...] = (),
 ) -> str:
     lines: list[str] = []
     for i, row in enumerate(ranking):
         marker = "*" if i == 0 else " "
-        intra = (
-            f"{row.intra_class_median:7.2f}"
-            if row.intra_class_median is not None
-            else "    n/a"
-        )
-        samples = ", ".join(f"{d:.2f}" for d in row.per_sample_distances)
         lines.append(
             f"{marker} {row.name:<10} d={row.aggregate_distance:7.2f} "
-            f"intra_med={intra} per_sample=[{samples}]"
+            f"incantation={row.alias!r}"
         )
     verdict = "ACCEPTED" if decision.accepted else "rejected"
-    intra_ratio = (
-        f"{decision.intra_ratio:.2f}/{decision.intra_ratio_max:.2f}"
-        if decision.intra_ratio is not None
+    distance = (
+        f"{decision.best_distance:.2f}/{decision.distance_max:.2f}"
+        if decision.best_distance is not None
         else "n/a"
     )
     margin_ratio = (
@@ -734,9 +649,12 @@ def format_recognition_debug(
         else "n/a"
     )
     lines.append(
-        f"decision: {verdict} intra_ratio={intra_ratio} "
+        f"decision: {verdict} distance={distance} "
         f"margin_ratio={margin_ratio} ({decision.reason})"
     )
+    if hypotheses:
+        phrase_list = ", ".join(f"{h.text} ({h.score:.1f})" for h in hypotheses)
+        lines.append(f"heard: {phrase_list}")
     return "\n".join(lines)
 
 
@@ -744,10 +662,10 @@ def _voice_decision_summary(
     ranking: tuple[SpellRanking, ...], decision: Decision
 ) -> str:
     if not ranking:
-        return "no trained voice samples"
+        return "no incantations"
     if (
-        decision.intra_ratio is not None
-        and decision.intra_ratio > decision.intra_ratio_max
+        decision.best_distance is not None
+        and decision.best_distance > decision.distance_max
     ):
         return f"low confidence for {ranking[0].name}"
     if (
@@ -757,6 +675,36 @@ def _voice_decision_summary(
     ):
         return f"too close between {ranking[0].name} and {ranking[1].name}"
     return decision.reason
+
+
+def _score_pending_incantations(
+    query: Any,
+    hypotheses: tuple[TextHypothesis, ...],
+    backend: VoiceTemplateBackend,
+) -> tuple[PendingIncantation, ...]:
+    if backend.tokenize_text is None or backend.distance_to_tokens is None:
+        return ()
+    pending: list[PendingIncantation] = []
+    seen: set[str] = set()
+    for hypothesis in hypotheses:
+        key = hypothesis.text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            token_ids = backend.tokenize_text(hypothesis.text)
+        except ValueError:
+            continue
+        pending.append(
+            PendingIncantation(
+                text=hypothesis.text,
+                distance=backend.distance_to_tokens(query, token_ids),
+                token_ids=token_ids,
+                hypothesis_score=hypothesis.score,
+            )
+        )
+    pending.sort(key=lambda row: row.distance)
+    return tuple(pending)
 
 
 def _strictness_value(

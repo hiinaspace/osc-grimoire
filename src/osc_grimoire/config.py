@@ -13,14 +13,11 @@ class AudioConfig:
 @dataclass(frozen=True)
 class VoiceRecognitionConfig:
     trim_top_db: float = 30.0
-    # Garbage gate: accept only if best DTW <= ratio_max * intra_class_median(best_spell).
-    intra_class_ratio_max: float = 2.5
+    # Garbage gate: accept only if best forced-incantation distance is low enough.
+    voice_alias_distance_max: float = 7.0
     # Confusion gate: accept only if (second - best) / second >= margin_min.
     # Skipped when the spellbook has only one spell.
     relative_margin_min: float = 0.20
-    # If a spell has no intra_class_median yet (untrained / single sample),
-    # fall back to this absolute distance.
-    untrained_distance_fallback: float = 600.0
 
 
 @dataclass(frozen=True)
@@ -71,4 +68,3 @@ class AppConfig:
     openvr: OpenVrOverlayConfig = field(default_factory=OpenVrOverlayConfig)
     osc: OscConfig = field(default_factory=OscConfig)
     hotkey: str = "space"
-    default_samples_per_spell: int = 5
