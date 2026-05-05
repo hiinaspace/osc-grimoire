@@ -2,6 +2,8 @@
 
 Send OSC parameters to your avatar in vrchat with your voice or a gesture. Tuned for spellcasting. Even nonsense words other speech recognition systems won't recognize should work.
 
+[osc-grimoire no training 2026-05-04 22-17-02-[00.01.766-00.42.533]-audio.webm](https://github.com/user-attachments/assets/6b64d224-12e3-4803-9ea3-f6133e3ad438)
+
 ## Install
 
 Download the latest Windows zip from the
