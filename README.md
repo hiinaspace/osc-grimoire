@@ -1,6 +1,6 @@
 # OSC Grimoire
 
-Send OSC parameters to your avatar in vrchat with your voice or a gesture. Tuned for spellcasting. Even nonsense words other speech recognition systems won't recognize should work.
+Send OSC parameters to your avatar in vrchat with your voice, a wand gesture, or a two-hand stance. Tuned for spellcasting. Even nonsense words other speech recognition systems won't recognize should work.
 
 [osc-grimoire no training 2026-05-04 22-17-02-[00.01.766-00.42.533]-audio.webm](https://github.com/user-attachments/assets/6b64d224-12e3-4803-9ea3-f6133e3ad438)
 
@@ -34,9 +34,13 @@ Hold down trigger, speak the name of a spell. If you spoke it right, you'll see 
 
 ![spell recognized](docs/spellrecognized.png)
 
+For spells with a trained stance, take the saved start pose with both
+controllers. After the start pose locks, move into the saved end pose and hold it
+briefly to cast.
+
 ### 3. Edit a spell
 
-If you click on a spell, you can edit the incantations used to speak it, an optional gesture, the OSC parameters sent, and the spell name.
+If you click on a spell, you can edit the incantations used to speak it, an optional gesture, an optional stance, the OSC parameters sent, and the spell name.
 
 ![new spell page](docs/spellpage.png)
 
@@ -59,11 +63,34 @@ pronunciation.
 
 ### 4. Train the wand gesture
 
-On the spell page, click `Record / Replace Gesture`. In VR, hold the casting-hand
-grip button, draw the gesture, then release grip. The saved gesture preview appears on the page.
+On the spell page, click `Record Gesture`. In VR, hold the casting-hand grip
+button, draw the gesture, then release grip. The saved gesture preview appears
+on the page.
 
-You can replace the gesture at any time by pressing `Record / Replace Gesture`
-again. Use `Clear Gesture` if you want the spell to be voice-only.
+You can replace the gesture at any time by pressing `Record Gesture`
+again. Use `Clear Gesture` if you want to remove gesture casting from the spell.
+
+### 5. Train a two-hand stance
+
+On the spell page, click `Record Stance`. In VR, put both controllers in the
+start pose you want, then press both triggers once. Move one or both hands to the
+end pose, then press both triggers again. The saved stance preview appears on the
+page as front/side orthographic trails with small orientation axes.
+
+Stances are saved relative to your head's yaw at the start pose. Head pitch and
+roll are ignored, and turning your head after the start pose is recorded does
+not rotate the saved target.
+
+At runtime, keep both controllers near the saved start pose for about half a
+second. OSC Grimoire pulses `OSCGrimoireStanceStart`, marks
+`OSCGrimoireStanceCasting=true`, then waits for the saved end pose. The spell
+fires after the end pose is held briefly; if the end pose is not reached before
+the timeout, the spell fizzles.
+
+Use `Preview in VR` to loop hand-sized left/right gizmos at the saved poses. The
+preview recenters to your current head yaw when enabled and stops when you leave
+that spell page or uncheck the box. Use `Clear Stance` if you want to remove the
+stance from a spell.
 
 ## QA
 
@@ -105,6 +132,9 @@ Outputs sent to VRChat:
 
 - `OSCGrimoireVoiceRecording`: true while voice recording is active.
 - `OSCGrimoireGestureDrawing`: true while gesture drawing is active.
+- `OSCGrimoireStanceCasting`: true after a stance start pose locks and until it
+  casts or fizzles.
+- `OSCGrimoireStanceStart`: short pulse when a stance start pose locks.
 - `OSCGrimoireFizzle`: short pulse when recognition rejects.
 - `OSCGrimoireSpell<Name>`: default bool pulse when a spell is accepted, unless
   the spell has a custom OSC signal.
@@ -114,6 +144,7 @@ Inputs accepted from VRChat:
 - `OSCGrimoireUIEnabled`: show or hide the spellbook.
 - `OSCGrimoireGestureEnabled`: enable or disable gesture input.
 - `OSCGrimoireVoiceEnabled`: enable or disable voice input.
+- `OSCGrimoireStanceEnabled`: enable or disable stance input.
 
 These are useful for avatar menu toggles.
 
@@ -127,8 +158,11 @@ Open `Settings`. The `Voice` and `Gesture` sliders move from `Lenient` to
 
 The defaults are intentionally somewhat lenient so the system feels responsive.
 
-If the recognition is still too hard at low strictness, add an incantation from
-the heard phrase list or choose a more distinct spell word.
+If voice recognition is still too hard at low strictness, add an incantation
+from the heard phrase list or choose a more distinct spell word. If stance
+recognition is unreliable, retrain with more distinct start/end hand poses, use
+`Preview in VR` to line up the orientation, or temporarily disable the `Stance`
+toggle.
 
 ![settings](docs/settings.png)
 
@@ -141,6 +175,9 @@ Default bindings:
 
 - Voice: hold trigger on the casting hand.
 - Gesture: hold grip on the casting hand.
+- Stance training: with `Record Stance` armed, press both triggers to mark the
+  start pose and press both triggers again to mark the end pose. Runtime stance
+  recognition does not use a button.
 - Show/hide spellbook: hold both B buttons.
 
 ### How do I change casting hand?
@@ -148,21 +185,25 @@ Default bindings:
 Open `Settings` and choose `Left` or `Right` under `Casting hand`. The spellbook
 appears on the opposite hand.
 
-### Can I use only voice or only gesture?
+### Can I use only voice, gesture, or stance?
 
-Yes. A spell can have incantations, a gesture, or both. Use `Clear Gesture` to
-remove a gesture from an existing spell.
+Yes. A spell can have incantations, a gesture, a stance, or any combination.
+Use `Clear Gesture` or `Clear Stance` to remove a modality from an existing
+spell.
 
 ### Why did my spell fizzle?
 
-A fizzle means the latest voice or gesture attempt did not pass the current
-thresholds. Common fixes:
+A fizzle means the latest voice, gesture, or stance attempt did not pass the
+current thresholds. Common fixes:
 
 - Add a clearer alternate spelling or phrase as an incantation.
 - Add an incantation from the heard phrase list.
 - Edit the spell name if the written form does not match your pronunciation.
 - Make gestures more distinct from each other.
-- Move the relevant strictness slider slightly toward `Lenient`.
+- Retrain stances with more distinct start/end poses.
+- Hold the stance end pose briefly instead of passing through it.
+- For voice or gesture, move the relevant strictness slider slightly toward
+  `Lenient`.
 
 ### Where is my spellbook saved?
 
@@ -193,6 +234,11 @@ score they would get if added. See [the investigation notes](./docs/INVESTIGATIO
 for more detail.
 
 The gesture recognition is the [$Q recognizer](https://depts.washington.edu/acelab/proj/dollar/qdollar.html) on a projected version of your controller position.
+
+The stance recognition is a dual-controller start/end pose gate. Each recorded
+pose is stored relative to head yaw, with position and controller orientation
+both checked. The recorded motion between start and end is used for UI and VR
+preview only.
 
 ### How is this different than just matching the speech-to-text (STT) output?
 

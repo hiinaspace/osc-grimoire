@@ -38,7 +38,18 @@ from .spellbook import (
     replace_spell,
     save_spellbook,
     set_gesture_sample,
+    set_stance_sample,
+    stance_sample_path,
 )
+from .stance_capture import StanceSample, load_stance_sample, save_stance_sample
+from .stance_gate import (
+    StanceDecision,
+    StanceGate,
+    StanceGateEvent,
+    StanceRanking,
+    load_stance_templates,
+)
+from .stance_geometry import Pose
 from .voice_features import FloatArray
 from .voice_recognizer import (
     Decision,
@@ -73,14 +84,25 @@ class OutputSink(Protocol):
 
     def set_gesture_drawing(self, drawing: bool) -> None: ...
 
+    def set_stance_casting(self, casting: bool) -> None: ...
+
+    def pulse_stance_start(self) -> None: ...
+
     def set_ui_enabled(self, enabled: bool) -> None: ...
 
     def set_voice_enabled(self, enabled: bool) -> None: ...
 
     def set_gesture_enabled(self, enabled: bool) -> None: ...
 
+    def set_stance_enabled(self, enabled: bool) -> None: ...
+
     def set_enable_toggles(
-        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+        self,
+        *,
+        ui_enabled: bool,
+        gesture_enabled: bool,
+        voice_enabled: bool,
+        stance_enabled: bool,
     ) -> None: ...
 
     def pulse_spell(self, spell: Spell) -> None: ...
@@ -95,6 +117,7 @@ class InputSink(Protocol):
     ui_enabled: bool
     gesture_enabled: bool
     voice_enabled: bool
+    stance_enabled: bool
 
     def recent_messages(self) -> tuple[Any, ...]: ...
 
@@ -104,6 +127,7 @@ class InputSink(Protocol):
         ui_enabled: bool | None = None,
         gesture_enabled: bool | None = None,
         voice_enabled: bool | None = None,
+        stance_enabled: bool | None = None,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -139,6 +163,13 @@ class GestureResult:
 
 
 @dataclass(frozen=True)
+class StanceResult:
+    ranking: tuple[StanceRanking, ...]
+    decision: StanceDecision
+    debug_text: str
+
+
+@dataclass(frozen=True)
 class UiLogEntry:
     timestamp: datetime
     message: str
@@ -170,17 +201,25 @@ class GrimoireController:
         self.local_ui_enabled = True
         self.local_gesture_enabled = True
         self.local_voice_enabled = True
+        self.local_stance_enabled = True
         self.voice_strictness = DEFAULT_RECOGNITION_STRICTNESS
         self.gesture_strictness = DEFAULT_RECOGNITION_STRICTNESS
         self.spellbook = load_spellbook(data_dir)
+        self.stance_gate = StanceGate(self.config.stance)
         self.draft: DraftSpell | None = None
         self.status = "Ready."
         self.last_result: RecognitionResult | None = None
         self.last_name_hypotheses: tuple[TextHypothesis, ...] = ()
         self.last_gesture_result: GestureResult | None = None
+        self.last_stance_result: StanceResult | None = None
         self.last_match_kind: str | None = None
         self.latest_gesture_points: FloatArray | None = None
+        self.latest_stance_sample: StanceSample | None = None
+        self.active_stance_preview_spell_id: str | None = None
+        self.active_stance_preview_sample: StanceSample | None = None
+        self._stance_preview_revision = 0
         self.armed_gesture_spell_id: str | None = None
+        self.armed_stance_spell_id: str | None = None
         self.ui_log: deque[UiLogEntry] = deque(maxlen=12)
 
     @property
@@ -218,6 +257,13 @@ class GrimoireController:
         )
         return self.local_voice_enabled and osc_enabled
 
+    @property
+    def stance_enabled(self) -> bool:
+        osc_enabled = (
+            self.osc_input.stance_enabled if self.osc_input is not None else True
+        )
+        return self.local_stance_enabled and osc_enabled
+
     def set_gesture_enabled(self, enabled: bool) -> None:
         self.local_gesture_enabled = enabled
         if self.osc_input is not None:
@@ -233,6 +279,16 @@ class GrimoireController:
         if self.output is not None:
             self.output.set_voice_enabled(enabled)
         self.status = f"Voice input {'enabled' if enabled else 'disabled'}."
+
+    def set_stance_enabled(self, enabled: bool) -> None:
+        self.local_stance_enabled = enabled
+        if self.osc_input is not None:
+            self.osc_input.set_enabled_state(stance_enabled=enabled)
+        if self.output is not None:
+            self.output.set_stance_enabled(enabled)
+        if not enabled:
+            self.reset_stance_gate()
+        self.status = f"Stance input {'enabled' if enabled else 'disabled'}."
 
     def set_ui_enabled(self, enabled: bool) -> None:
         self.local_ui_enabled = enabled
@@ -310,6 +366,14 @@ class GrimoireController:
         if self.output is not None:
             self.output.set_gesture_drawing(drawing)
 
+    def set_stance_casting(self, casting: bool) -> None:
+        if self.output is not None:
+            self.output.set_stance_casting(casting)
+
+    def pulse_stance_start(self) -> None:
+        if self.output is not None:
+            self.output.pulse_stance_start()
+
     def sync_enable_toggles_to_output(self) -> None:
         if self.output is None:
             return
@@ -317,6 +381,7 @@ class GrimoireController:
             ui_enabled=self.ui_enabled,
             gesture_enabled=self.gesture_enabled,
             voice_enabled=self.voice_enabled,
+            stance_enabled=self.stance_enabled,
         )
 
     def tick_outputs(self, now: float | None = None) -> None:
@@ -463,7 +528,9 @@ class GrimoireController:
         save_spellbook(self.spellbook)
         self.last_result = None
         self.last_gesture_result = None
+        self.last_stance_result = None
         self.last_match_kind = None
+        self._clear_active_stance_preview(spell.id)
         self.status = f"Deleted spell {spell.name}."
         self.add_log(f"Deleted spell: {spell.name}")
         return spell.name
@@ -473,6 +540,15 @@ class GrimoireController:
         self.armed_gesture_spell_id = spell.id
         self.status = (
             f"Armed gesture recording for {spell.name}. Hold right grip and draw."
+        )
+        return spell
+
+    def arm_stance_recording(self, spell_id: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        self.armed_stance_spell_id = spell.id
+        self.reset_stance_gate()
+        self.status = (
+            f"Armed stance recording for {spell.name}. Press both triggers to start."
         )
         return spell
 
@@ -502,6 +578,30 @@ class GrimoireController:
         self.status = f"Saved gesture for {fresh.name}."
         return fresh
 
+    def handle_stance_sample(self, sample: StanceSample) -> Spell:
+        if self.armed_stance_spell_id is None:
+            raise ValueError("No stance recording is armed")
+        spell_id = self.armed_stance_spell_id
+        self.armed_stance_spell_id = None
+        return self.save_stance_sample(spell_id, sample)
+
+    def save_stance_sample(self, spell_id: str, sample: StanceSample) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        if len(sample.frames) < 2:
+            raise ValueError("Stance needs a start pose and an end pose")
+        path, relative_path = stance_sample_path(self.spellbook, spell)
+        save_stance_sample(path, sample)
+        self.spellbook = set_stance_sample(self.spellbook, spell, relative_path)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.latest_stance_sample = sample
+        self.last_stance_result = None
+        if self.active_stance_preview_spell_id == spell.id:
+            self.active_stance_preview_sample = sample
+            self._stance_preview_revision += 1
+        self.status = f"Saved stance for {fresh.name}."
+        return fresh
+
     def clear_gesture_sample(self, spell_id: str) -> Spell:
         spell = self._spell_or_raise(spell_id)
         for relative_path in spell.gesture_samples:
@@ -516,6 +616,24 @@ class GrimoireController:
         self.latest_gesture_points = None
         self.status = f"Cleared gesture for {fresh.name}."
         self.add_log(f"Cleared gesture: {fresh.name}")
+        return fresh
+
+    def clear_stance_sample(self, spell_id: str) -> Spell:
+        spell = self._spell_or_raise(spell_id)
+        for relative_path in spell.stance_samples:
+            path = self.data_dir / relative_path
+            if path.exists():
+                path.unlink()
+        updated = replace(spell, has_stance=False, stance_samples=())
+        self.spellbook = replace_spell(self.spellbook, updated)
+        save_spellbook(self.spellbook)
+        fresh = self._spell_or_raise(spell.id)
+        self.last_stance_result = None
+        self.latest_stance_sample = None
+        self._clear_active_stance_preview(spell.id)
+        self.reset_stance_gate()
+        self.status = f"Cleared stance for {fresh.name}."
+        self.add_log(f"Cleared stance: {fresh.name}")
         return fresh
 
     def recognize_gesture(self, points: FloatArray) -> GestureResult:
@@ -559,6 +677,28 @@ class GrimoireController:
             )
         self._emit_gesture_result(result)
         return result
+
+    def update_stance_tracking(
+        self, *, now: float, left: Pose, right: Pose
+    ) -> StanceGateEvent:
+        if not self.stance_enabled or self.armed_stance_spell_id is not None:
+            casting_ended = self.stance_gate.reset()
+            if casting_ended:
+                self.set_stance_casting(False)
+            return StanceGateEvent(state=self.stance_gate.state)
+        templates = load_stance_templates(self.spellbook)
+        event = self.stance_gate.update(
+            now=now,
+            left=left,
+            right=right,
+            templates=templates,
+        )
+        self._handle_stance_gate_event(event)
+        return event
+
+    def reset_stance_gate(self) -> None:
+        if self.stance_gate.reset():
+            self.set_stance_casting(False)
 
     def recognize(self, audio: FloatArray) -> RecognitionResult:
         if audio.size == 0:
@@ -606,6 +746,58 @@ class GrimoireController:
     def gesture_preview(self, spell: Spell) -> FloatArray | None:
         return gesture_preview_points(self.spellbook, spell, self.config.gesture)
 
+    def stance_preview(self, spell: Spell) -> StanceSample | None:
+        if not spell.stance_samples:
+            return None
+        path = self.data_dir / spell.stance_samples[0]
+        if not path.exists():
+            return None
+        return load_stance_sample(path)
+
+    def stance_preview_enabled(self, spell_id: str) -> bool:
+        return (
+            self.active_stance_preview_spell_id == spell_id
+            and self.active_stance_preview_sample is not None
+        )
+
+    def set_stance_preview_enabled(
+        self, spell_id: str, enabled: bool
+    ) -> StanceSample | None:
+        spell = self._spell_or_raise(spell_id)
+        if not enabled:
+            self._clear_active_stance_preview(spell.id)
+            self.status = f"Stopped stance preview for {spell.name}."
+            return None
+        sample = self.stance_preview(spell)
+        if sample is None:
+            raise ValueError(f"No stance recorded for {spell.name}")
+        self.active_stance_preview_spell_id = spell.id
+        self.active_stance_preview_sample = sample
+        self._stance_preview_revision += 1
+        self.latest_stance_sample = sample
+        self.status = f"Previewing stance for {spell.name}."
+        return sample
+
+    def request_stance_preview(self, spell_id: str) -> StanceSample:
+        sample = self.set_stance_preview_enabled(spell_id, True)
+        assert sample is not None
+        return sample
+
+    def stance_preview_state(self) -> tuple[int, StanceSample | None]:
+        return self._stance_preview_revision, self.active_stance_preview_sample
+
+    def _clear_active_stance_preview(self, spell_id: str | None = None) -> None:
+        if spell_id is not None and self.active_stance_preview_spell_id != spell_id:
+            return
+        if (
+            self.active_stance_preview_spell_id is None
+            and self.active_stance_preview_sample is None
+        ):
+            return
+        self.active_stance_preview_spell_id = None
+        self.active_stance_preview_sample = None
+        self._stance_preview_revision += 1
+
     def next_default_spell_name(self) -> str:
         index = len(self.spellbook.spells) + 1
         while True:
@@ -623,6 +815,47 @@ class GrimoireController:
             self.output.pulse_fizzle()
 
     def _emit_gesture_result(self, result: GestureResult) -> None:
+        if self.output is None:
+            return
+        if result.decision.accepted and result.decision.best_spell_id is not None:
+            self.output.pulse_spell(self._spell_or_raise(result.decision.best_spell_id))
+        else:
+            self.output.pulse_fizzle()
+
+    def _handle_stance_gate_event(self, event: StanceGateEvent) -> None:
+        if event.casting_started:
+            self.set_stance_casting(True)
+            self.pulse_stance_start()
+            self.status = "Stance started."
+        if event.result is not None:
+            result = StanceResult(
+                ranking=event.result.ranking,
+                decision=event.result.decision,
+                debug_text=format_stance_debug(
+                    event.result.ranking, event.result.decision
+                ),
+            )
+            self.last_stance_result = result
+            self.last_match_kind = "stance"
+            self.status = (
+                "Stance accepted." if result.decision.accepted else "Stance fizzled."
+            )
+            if result.decision.accepted and result.decision.best_spell_id is not None:
+                spell = self._spell_or_raise(result.decision.best_spell_id)
+                self.add_log(
+                    f"Accepted: {spell.name} "
+                    f"(osc: {self.spell_osc_signal_summary(spell)})"
+                )
+            else:
+                self.add_log(
+                    f"Fizzle (osc: {self.fizzle_osc_parameter_name()}): "
+                    f"{result.decision.reason}"
+                )
+            self._emit_stance_result(result)
+        if event.casting_ended:
+            self.set_stance_casting(False)
+
+    def _emit_stance_result(self, result: StanceResult) -> None:
         if self.output is None:
             return
         if result.decision.accepted and result.decision.best_spell_id is not None:
@@ -760,4 +993,22 @@ def format_gesture_debug(
         )
     state = "ACCEPTED" if decision.accepted else "rejected"
     lines.append(f"gesture decision: {state} ({decision.reason})")
+    return "\n".join(lines)
+
+
+def format_stance_debug(
+    ranking: tuple[StanceRanking, ...], decision: StanceDecision
+) -> str:
+    if not ranking:
+        return f"stance: rejected ({decision.reason})"
+    lines: list[str] = []
+    for index, row in enumerate(ranking):
+        marker = "*" if index == 0 else " "
+        lines.append(
+            f"{marker} {row.name:<10} {row.phase} d={row.score:5.2f} "
+            f"lp={row.left_position_m:4.2f} rp={row.right_position_m:4.2f} "
+            f"lq={row.left_orientation_rad:4.2f} rq={row.right_orientation_rad:4.2f}"
+        )
+    state = "ACCEPTED" if decision.accepted else "rejected"
+    lines.append(f"stance decision: {state} ({decision.reason})")
     return "\n".join(lines)

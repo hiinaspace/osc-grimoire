@@ -43,6 +43,7 @@ class OscInputState:
     ui_enabled: bool = True
     gesture_enabled: bool = True
     voice_enabled: bool = True
+    stance_enabled: bool = True
 
 
 class OscInputService:
@@ -154,6 +155,10 @@ class OscInputService:
     def voice_enabled(self) -> bool:
         return self.state.voice_enabled
 
+    @property
+    def stance_enabled(self) -> bool:
+        return self.state.stance_enabled
+
     def _handle_message(self, address: str, *values: Any) -> None:
         if address == "/avatar/change":
             LOGGER.info("OSC avatar changed; requesting state resync.")
@@ -180,6 +185,7 @@ class OscInputService:
         ui_enabled: bool | None = None,
         gesture_enabled: bool | None = None,
         voice_enabled: bool | None = None,
+        stance_enabled: bool | None = None,
     ) -> None:
         with self._lock:
             self._state = OscInputState(
@@ -190,6 +196,9 @@ class OscInputService:
                 voice_enabled=self._state.voice_enabled
                 if voice_enabled is None
                 else voice_enabled,
+                stance_enabled=self._state.stance_enabled
+                if stance_enabled is None
+                else stance_enabled,
             )
         self._refresh_status_text()
 
@@ -205,7 +214,8 @@ class OscInputService:
             f"OSC input: {port_text}"
             f"UI={'on' if state.ui_enabled else 'off'} "
             f"gesture={'on' if state.gesture_enabled else 'off'} "
-            f"voice={'on' if state.voice_enabled else 'off'}"
+            f"voice={'on' if state.voice_enabled else 'off'} "
+            f"stance={'on' if state.stance_enabled else 'off'}"
         )
 
     def _start_oscquery(self, osc_port: int, oscquery_port: int) -> None:
@@ -302,6 +312,7 @@ def advertised_input_paths() -> tuple[str, ...]:
         "/avatar/parameters/OSCGrimoireUIEnabled",
         "/avatar/parameters/OSCGrimoireGestureEnabled",
         "/avatar/parameters/OSCGrimoireVoiceEnabled",
+        "/avatar/parameters/OSCGrimoireStanceEnabled",
     )
 
 
@@ -407,6 +418,7 @@ def parse_enabled_parameter(
         f"{prefix}UIEnabled": "ui_enabled",
         f"{prefix}GestureEnabled": "gesture_enabled",
         f"{prefix}VoiceEnabled": "voice_enabled",
+        f"{prefix}StanceEnabled": "stance_enabled",
     }
     field_name = names.get(address)
     if field_name is None or not values:
@@ -426,18 +438,28 @@ def update_input_state(state: OscInputState, update: tuple[str, bool]) -> OscInp
                 ui_enabled=value,
                 gesture_enabled=state.gesture_enabled,
                 voice_enabled=state.voice_enabled,
+                stance_enabled=state.stance_enabled,
             )
         case "gesture_enabled":
             return OscInputState(
                 ui_enabled=state.ui_enabled,
                 gesture_enabled=value,
                 voice_enabled=state.voice_enabled,
+                stance_enabled=state.stance_enabled,
             )
         case "voice_enabled":
             return OscInputState(
                 ui_enabled=state.ui_enabled,
                 gesture_enabled=state.gesture_enabled,
                 voice_enabled=value,
+                stance_enabled=state.stance_enabled,
+            )
+        case "stance_enabled":
+            return OscInputState(
+                ui_enabled=state.ui_enabled,
+                gesture_enabled=state.gesture_enabled,
+                voice_enabled=state.voice_enabled,
+                stance_enabled=value,
             )
     return state
 

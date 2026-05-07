@@ -1,7 +1,7 @@
 [project]
 name = "osc-grimoire"
 version = "0.1.0"
-description = "Local OpenVR overlay for VRChat spell-casting via voice and gesture recognition"
+description = "Local OpenVR overlay for VRChat spell-casting via voice, gesture, and stance recognition"
 readme = "README.md"
 authors = [
     { name = "Hiina", email = "hiina@hiina.space" }

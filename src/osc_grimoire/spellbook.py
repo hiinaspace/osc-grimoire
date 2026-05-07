@@ -11,7 +11,8 @@ from .paths import spell_samples_dir, spellbook_path
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {2, SCHEMA_VERSION}
 PRESET_SPELL_NAMES = ("Alohomora", "Spongify", "Rictusempra", "Flipendo")
 OscValue = bool | int | float
 
@@ -28,9 +29,11 @@ class Spell:
     name: str
     enabled: bool = True
     has_gesture: bool = False
+    has_stance: bool = False
     has_voice: bool = True
     voice_aliases: tuple[str, ...] = ()
     gesture_samples: tuple[str, ...] = ()
+    stance_samples: tuple[str, ...] = ()
     osc_address: str | None = None
     osc_on_cast: tuple[OscAction, ...] | None = None
     osc_after_cast: tuple[OscAction, ...] | None = None
@@ -63,7 +66,7 @@ def load_spellbook(data_dir: Path, *, seed_presets: bool = True) -> Spellbook:
             seeded_spellbook(data_dir) if seed_presets else Spellbook(data_dir=data_dir)
         )
     version = raw.get("version")
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(
             f"Unsupported spellbook version {version!r} (expected {SCHEMA_VERSION}). "
             "Reset or manually port the old data directory."
@@ -205,14 +208,40 @@ def set_gesture_sample(
     return replace_spell(spellbook, updated)
 
 
+def set_stance_sample(
+    spellbook: Spellbook, spell: Spell, relative_path: str
+) -> Spellbook:
+    current = find_spell_by_id(spellbook, spell.id)
+    if current is None:
+        raise ValueError(f"Spell {spell.id!r} not in spellbook")
+    updated = replace(
+        current,
+        has_stance=True,
+        stance_samples=(relative_path,),
+    )
+    return replace_spell(spellbook, updated)
+
+
 def gesture_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
     return [spellbook.data_dir / rel for rel in spell.gesture_samples]
+
+
+def stance_sample_abs_paths(spellbook: Spellbook, spell: Spell) -> list[Path]:
+    return [spellbook.data_dir / rel for rel in spell.stance_samples]
 
 
 def gesture_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
     samples_dir = spell_samples_dir(spellbook.data_dir, spell.id)
     samples_dir.mkdir(parents=True, exist_ok=True)
     candidate = samples_dir / "gesture_001.json"
+    relative = candidate.relative_to(spellbook.data_dir).as_posix()
+    return candidate, relative
+
+
+def stance_sample_path(spellbook: Spellbook, spell: Spell) -> tuple[Path, str]:
+    samples_dir = spell_samples_dir(spellbook.data_dir, spell.id)
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    candidate = samples_dir / "stance_001.json"
     relative = candidate.relative_to(spellbook.data_dir).as_posix()
     return candidate, relative
 
@@ -312,9 +341,11 @@ def _spell_from_json(entry: dict) -> Spell:
         name=entry["name"],
         enabled=entry.get("enabled", True),
         has_gesture=bool(modalities.get("gesture", False)),
+        has_stance=bool(modalities.get("stance", False)),
         has_voice=bool(modalities.get("voice", True)),
         voice_aliases=aliases,
         gesture_samples=tuple(samples.get("gestures", ())),
+        stance_samples=tuple(samples.get("stances", ())),
         osc_address=osc.get("address"),
         osc_on_cast=on_cast,
         osc_after_cast=after_cast,
@@ -347,6 +378,7 @@ def _spell_to_json(spell: Spell) -> dict:
         "enabled": spell.enabled,
         "modalities": {
             "gesture": spell.has_gesture,
+            "stance": spell.has_stance,
             "voice": spell.has_voice,
         },
         "osc": _osc_to_json(spell),
@@ -355,6 +387,7 @@ def _spell_to_json(spell: Spell) -> dict:
         },
         "samples": {
             "gestures": list(spell.gesture_samples),
+            "stances": list(spell.stance_samples),
         },
     }
 

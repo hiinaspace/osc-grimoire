@@ -27,6 +27,8 @@ from osc_grimoire.openvr_overlay import (
     uv_to_imgui,
 )
 from osc_grimoire.spellbook import Spell
+from osc_grimoire.stance_capture import StanceFrame, StanceSample
+from osc_grimoire.stance_geometry import Pose
 
 
 def test_uv_to_imgui_preserves_overlay_y_axis() -> None:
@@ -601,7 +603,7 @@ def test_runner_tolerates_no_data_from_pose_action_read(
     runner.vr_input = _NoDataPoseVrInput()
     runner.vr_system = _FakeSystem()
     runner.action_handles = _action_handles()
-    monkeypatch.setattr(runner, "_fallback_pointer_pose", lambda: None)
+    monkeypatch.setattr(runner, "_fallback_pose", lambda _hand: None)
 
     state = runner._input_state()
 
@@ -610,19 +612,142 @@ def test_runner_tolerates_no_data_from_pose_action_read(
     assert app.controller.status == "Waiting for SteamVR input data..."
 
 
+def test_input_state_reads_left_pose_with_left_source() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    vr_input = _SourceTrackingVrInput()
+    runner.openvr = _FakeOpenVr()
+    runner.vr_input = vr_input
+    runner.vr_system = _FakeSystem()
+    runner.action_handles = _action_handles()
+
+    state = runner._input_state()
+
+    assert state is not None
+    assert vr_input.pose_sources == [14, 24, 14]
+    assert ("left_trigger", 24) in vr_input.digital_sources
+    assert ("right_trigger", 14) in vr_input.digital_sources
+
+
+def test_stance_recording_uses_both_trigger_chord() -> None:
+    app = _FakeApp()
+    app.controller.armed_stance_spell_id = "spell-1"
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    poses = [
+        _FakePose(_matrix((0, 0, 0))),
+        _FakePose(_matrix((0.2, 0, 0))),
+        _FakePose(_matrix((-0.2, 0, 0))),
+    ]
+    state = OpenVrInputState(
+        trigger_down=False,
+        trigger_changed=False,
+        grip_down=False,
+        pose=poses[1],
+        left_trigger_down=True,
+        right_trigger_down=True,
+        left_pose=poses[2],
+        right_pose=poses[1],
+    )
+
+    runner._update_stance_recording(state, poses, now=0.0)
+    state = OpenVrInputState(False, False, False, poses[1], left_pose=poses[2], right_pose=poses[1])
+    runner._update_stance_recording(state, poses, now=0.1)
+    state = OpenVrInputState(
+        trigger_down=False,
+        trigger_changed=False,
+        grip_down=False,
+        pose=poses[1],
+        left_trigger_down=True,
+        right_trigger_down=True,
+        left_pose=poses[2],
+        right_pose=poses[1],
+    )
+    runner._update_stance_recording(state, poses, now=0.3)
+
+    assert app.controller.stance_count == 1
+    assert app.opened_gesture_results == [None]
+    assert not runner.stance_sampler.active
+
+
+def test_stance_preview_loops_until_controller_disables() -> None:
+    app = _FakeApp()
+    sample = StanceSample(
+        frames=(
+            StanceFrame(
+                0.0,
+                Pose((-0.1, 0.0, -0.3), (1.0, 0.0, 0.0, 0.0)),
+                Pose((0.1, 0.0, -0.3), (1.0, 0.0, 0.0, 0.0)),
+            ),
+            StanceFrame(
+                0.5,
+                Pose((-0.2, 0.1, -0.4), (1.0, 0.0, 0.0, 0.0)),
+                Pose((0.2, 0.1, -0.4), (1.0, 0.0, 0.0, 0.0)),
+            ),
+        )
+    )
+    app.controller.preview_state = (1, sample)
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_overlay = _FakeOverlay()
+    runner.stance_left_preview_overlay_handle = 101
+    runner.stance_left_preview_back_overlay_handle = 102
+    runner.stance_right_preview_overlay_handle = 103
+    runner.stance_right_preview_back_overlay_handle = 104
+    poses = [_FakePose(_matrix((0.0, 0.0, 0.0))) for _ in range(3)]
+
+    runner._update_stance_preview(poses, now=10.0)
+    runner._update_stance_preview(poses, now=11.25)
+
+    assert runner.stance_preview_sample == sample
+    assert runner.vr_overlay.shown == [101, 102, 103, 104]
+    assert runner.vr_overlay.hidden == []
+    assert len(runner.vr_overlay.transforms) == 8
+    front_matrix = runner.vr_overlay.transforms[0][1]
+    back_matrix = runner.vr_overlay.transforms[1][1]
+    assert back_matrix.m[0][0] == -front_matrix.m[0][0]
+    assert back_matrix.m[1][1] == front_matrix.m[1][1]
+    assert back_matrix.m[2][2] == -front_matrix.m[2][2]
+
+    app.controller.preview_state = (2, None)
+    runner._update_stance_preview(poses, now=11.3)
+
+    assert runner.stance_preview_sample is None
+    assert runner.vr_overlay.hidden == [101, 102, 103, 104]
+
+
 class _FakeController:
     status = ""
-    config = type("Config", (), {"gesture": GestureRecognitionConfig()})()
+    config = type(
+        "Config",
+        (),
+        {
+            "gesture": GestureRecognitionConfig(),
+            "stance": type(
+                "Stance",
+                (),
+                {"record_chord_debounce_s": 0.2, "preview_gizmo_size_m": 0.10},
+            )(),
+        },
+    )()
 
     def __init__(self) -> None:
         self.gesture_count = 0
+        self.stance_count = 0
         self.ui_toggle_count = 0
         self.gesture_drawing: list[bool] = []
         self.voice_recording: list[bool] = []
+        self.stance_casting: list[bool] = []
         self.gesture_result = None
+        self.stance_result = None
+        self.armed_stance_spell_id = None
         self.ui_enabled = True
         self.gesture_enabled = True
         self.voice_enabled = True
+        self.stance_enabled = True
+        self.reset_stance_count = 0
+        self.stance_updates = []
+        self.preview_state = (0, None)
 
     def handle_gesture_stroke(self, _points) -> None:
         self.gesture_count += 1
@@ -633,6 +758,23 @@ class _FakeController:
 
     def set_voice_recording(self, recording: bool) -> None:
         self.voice_recording.append(recording)
+
+    def set_stance_casting(self, casting: bool) -> None:
+        self.stance_casting.append(casting)
+
+    def handle_stance_sample(self, _sample) -> None:
+        self.stance_count += 1
+        self.armed_stance_spell_id = None
+        return self.stance_result
+
+    def update_stance_tracking(self, **kwargs) -> None:
+        self.stance_updates.append(kwargs)
+
+    def reset_stance_gate(self) -> None:
+        self.reset_stance_count += 1
+
+    def stance_preview_state(self):
+        return self.preview_state
 
     def toggle_ui_enabled(self) -> None:
         self.ui_toggle_count += 1
@@ -723,9 +865,19 @@ class _FakeOpenVr:
             self.vTopLeft = SimpleNamespace(v=[0.0, 0.0])
             self.vBottomRight = SimpleNamespace(v=[0.0, 0.0])
 
+    class HmdMatrix34_t:
+        def __init__(self) -> None:
+            self.m = [
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+
 
 class _FakeSystem:
     def getTrackedDeviceIndexForControllerRole(self, role: int) -> int:
+        if role == _FakeOpenVr.TrackedControllerRole_LeftHand:
+            return 2
         assert role == _FakeOpenVr.TrackedControllerRole_RightHand
         return 1
 
@@ -744,6 +896,7 @@ class _FakeOverlay:
     def __init__(self) -> None:
         self.shown: list[int] = []
         self.hidden: list[int] = []
+        self.transforms: list[tuple[int, object]] = []
         self.events: list[_FakeEvent] = []
         self.keyboard_text = ""
 
@@ -753,8 +906,8 @@ class _FakeOverlay:
     def hideOverlay(self, handle: int) -> None:
         self.hidden.append(handle)
 
-    def setOverlayTransformAbsolute(self, _handle: int, _origin: int, _matrix) -> None:
-        pass
+    def setOverlayTransformAbsolute(self, handle: int, _origin: int, matrix) -> None:
+        self.transforms.append((handle, matrix))
 
     def showKeyboardForOverlay(self, *_args) -> None:
         pass
@@ -786,6 +939,33 @@ class _FakeVrInput:
         self, app_key: str, action_set: int, device_handle: int, show_on_desktop: bool
     ) -> None:
         self.binding_calls.append((app_key, action_set, device_handle, show_on_desktop))
+
+
+class _SourceTrackingVrInput:
+    def __init__(self) -> None:
+        self.pose_sources: list[int] = []
+        self.digital_sources: list[tuple[str, int]] = []
+
+    def updateActionState(self, _sets) -> None:
+        pass
+
+    def getDigitalActionData(self, handle: int, source: int):
+        names = {
+            9: "ui_toggle",
+            11: "right_trigger",
+            12: "right_grip",
+            21: "left_trigger",
+            22: "left_grip",
+        }
+        self.digital_sources.append((names[handle], source))
+        return _FakeDigitalActionData()
+
+    def getPoseActionDataForNextFrame(self, _handle: int, _origin: int, source: int):
+        self.pose_sources.append(source)
+        return SimpleNamespace(
+            bActive=True,
+            pose=_FakePose(_matrix((0.0, 0.0, 0.0))),
+        )
 
 
 class _NoDataVrInput:

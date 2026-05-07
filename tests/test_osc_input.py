@@ -18,6 +18,7 @@ def test_advertised_input_paths_match_vrchat_send_roots() -> None:
         "/avatar/parameters/OSCGrimoireUIEnabled",
         "/avatar/parameters/OSCGrimoireGestureEnabled",
         "/avatar/parameters/OSCGrimoireVoiceEnabled",
+        "/avatar/parameters/OSCGrimoireStanceEnabled",
     )
 
 
@@ -50,17 +51,19 @@ def test_osc_input_service_records_relevant_parameters_only() -> None:
     service._handle_message("/avatar/parameters/OSCGrimoireUIEnabled", False)
     service._handle_message("/avatar/parameters/OSCGrimoireGestureEnabled", 0)
     service._handle_message("/avatar/parameters/OSCGrimoireVoiceEnabled", 1.0)
+    service._handle_message("/avatar/parameters/OSCGrimoireStanceEnabled", False)
     service._handle_message("/tracking/vrsystem/head", 1.0, 2.0, 3.0)
 
     messages = service.recent_messages()
     assert [message.address for message in messages] == [
-        "/avatar/parameters/OSCGrimoireGestureEnabled",
         "/avatar/parameters/OSCGrimoireVoiceEnabled",
+        "/avatar/parameters/OSCGrimoireStanceEnabled",
     ]
     assert not service.ui_enabled
     assert not service.gesture_enabled
     assert service.voice_enabled
-    assert "OSCGrimoireVoiceEnabled" in format_recent_osc_messages(messages)
+    assert not service.stance_enabled
+    assert "OSCGrimoireStanceEnabled" in format_recent_osc_messages(messages)
 
 
 def test_osc_input_avatar_change_invokes_resync_callback() -> None:
@@ -80,11 +83,12 @@ def test_osc_input_set_enabled_state_mirrors_outgoing_state() -> None:
     service = OscInputService(OscConfig())
     service._handle_message("/avatar/parameters/OSCGrimoireVoiceEnabled", False)
 
-    service.set_enabled_state(ui_enabled=False, voice_enabled=True)
+    service.set_enabled_state(ui_enabled=False, voice_enabled=True, stance_enabled=False)
 
     assert not service.ui_enabled
     assert service.gesture_enabled
     assert service.voice_enabled
+    assert not service.stance_enabled
 
 
 def test_osc_input_disabled_does_not_start() -> None:

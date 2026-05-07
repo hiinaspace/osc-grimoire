@@ -134,11 +134,14 @@ def test_osc_output_sends_recording_pulses_and_resets() -> None:
 
     output.set_voice_recording(True)
     output.set_gesture_drawing(True)
+    output.set_stance_casting(True)
     output.set_enable_toggles(
         ui_enabled=False,
         gesture_enabled=True,
         voice_enabled=False,
+        stance_enabled=True,
     )
+    output.pulse_stance_start()
     output.pulse_spell(Spell(id="spell-1", name="Lumos!", osc_address="CustomFire"))
     output.pulse_fizzle()
     clock.value = 0.20
@@ -147,11 +150,15 @@ def test_osc_output_sends_recording_pulses_and_resets() -> None:
     assert client.messages == [
         ("/avatar/parameters/OSCGrimoireVoiceRecording", True),
         ("/avatar/parameters/OSCGrimoireGestureDrawing", True),
+        ("/avatar/parameters/OSCGrimoireStanceCasting", True),
         ("/avatar/parameters/OSCGrimoireUIEnabled", False),
         ("/avatar/parameters/OSCGrimoireGestureEnabled", True),
         ("/avatar/parameters/OSCGrimoireVoiceEnabled", False),
+        ("/avatar/parameters/OSCGrimoireStanceEnabled", True),
+        ("/avatar/parameters/OSCGrimoireStanceStart", True),
         ("/avatar/parameters/CustomFire", True),
         ("/avatar/parameters/OSCGrimoireFizzle", True),
+        ("/avatar/parameters/OSCGrimoireStanceStart", False),
         ("/avatar/parameters/CustomFire", False),
         ("/avatar/parameters/OSCGrimoireFizzle", False),
     ]

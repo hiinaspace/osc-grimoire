@@ -19,6 +19,8 @@ from osc_grimoire.spellbook import (
     remove_voice_alias,
     save_spellbook,
     set_gesture_sample,
+    set_stance_sample,
+    stance_sample_path,
 )
 
 
@@ -51,6 +53,7 @@ def test_create_save_load_alias_round_trip(tmp_path: Path) -> None:
     assert s.id == spell.id
     assert s.has_voice is True
     assert s.has_gesture is False
+    assert s.has_stance is False
     assert s.voice_aliases == ("Flipendo", "Fli pendo")
 
 
@@ -83,6 +86,31 @@ def test_v1_spellbook_is_explicitly_unsupported(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported spellbook version"):
         load_spellbook(tmp_path)
+
+
+def test_v2_spellbook_loads_with_empty_stance_fields(tmp_path: Path) -> None:
+    (tmp_path / "spellbook.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "spells": [
+                    {
+                        "id": "spell-1",
+                        "name": "Lumos",
+                        "modalities": {"voice": True, "gesture": False},
+                        "recognition": {"voice_aliases": ["Lumos"]},
+                        "samples": {"gestures": []},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    book = load_spellbook(tmp_path)
+
+    assert book.spells[0].has_stance is False
+    assert book.spells[0].stance_samples == ()
 
 
 def test_load_corrupt_spellbook_backs_up_and_starts_with_presets(
@@ -161,3 +189,16 @@ def test_set_gesture_sample_overwrites_single_gesture(tmp_path: Path) -> None:
     updated = book.spells[0]
     assert updated.has_gesture
     assert updated.gesture_samples == (relative,)
+
+
+def test_set_stance_sample_overwrites_single_stance(tmp_path: Path) -> None:
+    book = load_spellbook(tmp_path, seed_presets=False)
+    book, spell = create_spell(book, "Lumos")
+    _path, relative = stance_sample_path(book, spell)
+
+    book = set_stance_sample(book, spell, relative)
+    book = set_stance_sample(book, book.spells[0], relative)
+
+    updated = book.spells[0]
+    assert updated.has_stance
+    assert updated.stance_samples == (relative,)

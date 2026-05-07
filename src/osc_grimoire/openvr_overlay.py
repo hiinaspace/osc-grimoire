@@ -23,6 +23,18 @@ from .gesture_capture import GestureStrokeSampler
 from .osc_input import OscInputService
 from .osc_output import OscOutput
 from .paths import default_data_dir
+from .stance_capture import (
+    StanceFrame,
+    StanceSample,
+    StanceSampler,
+    interpolate_stance_frame,
+)
+from .stance_geometry import (
+    absolute_pose_from_hmd_yaw_relative,
+    hmd_yaw_relative_pose,
+    matrix34_from_pose,
+    yaw_reference_from_matrix34,
+)
 
 LOGGER = logging.getLogger(__name__)
 OVERLAY_KEY = "space.hiina.osc_grimoire.spellbook"
@@ -67,6 +79,12 @@ class OpenVrInputState:
     trigger_changed: bool
     grip_down: bool
     pose: Any | None
+    left_trigger_down: bool = False
+    right_trigger_down: bool = False
+    left_grip_down: bool = False
+    right_grip_down: bool = False
+    left_pose: Any | None = None
+    right_pose: Any | None = None
 
 
 @dataclass
@@ -97,7 +115,7 @@ def ensure_application_manifest() -> Path:
                 "strings": {
                     "en_us": {
                         "name": "OSC Grimoire",
-                        "description": "VR spellbook overlay for voice and gesture spell casting.",
+                        "description": "VR spellbook overlay for voice, gesture, and stance spell casting.",
                     }
                 },
             }
@@ -119,6 +137,10 @@ def is_trigger_pressed(button_mask: int, trigger_button_id: int = 33) -> bool:
 
 def is_button_pressed(button_mask: int, button_id: int) -> bool:
     return bool(button_mask & (1 << button_id))
+
+
+def _digital_pressed(data: Any | None) -> bool:
+    return bool(data is not None and data.bActive and data.bState)
 
 
 def next_mouse_events(
@@ -158,6 +180,14 @@ def overlay_transform_matrix(config: OpenVrOverlayConfig) -> Any:
     matrix.m[2][1] = 0.0
     matrix.m[2][2] = 1.0
     matrix.m[2][3] = config.offset_z
+    return matrix
+
+
+def _backface_overlay_matrix_from_pose(openvr: Any, pose: Any) -> Any:
+    matrix = matrix34_from_pose(openvr, pose)
+    for row in range(3):
+        matrix.m[row][0] *= -1.0
+        matrix.m[row][2] *= -1.0
     return matrix
 
 
@@ -355,12 +385,26 @@ class OpenVrOverlayRunner:
         self.action_handles: OpenVrActionHandles | None = None
         self.overlay_handle: int | None = None
         self.trail_overlay_handle: int | None = None
+        self.stance_left_preview_overlay_handle: int | None = None
+        self.stance_left_preview_back_overlay_handle: int | None = None
+        self.stance_right_preview_overlay_handle: int | None = None
+        self.stance_right_preview_back_overlay_handle: int | None = None
         self.trail_texture: StrokeTrailTexture | None = None
+        self.stance_left_preview_texture: HandGizmoOverlayTexture | None = None
+        self.stance_right_preview_texture: HandGizmoOverlayTexture | None = None
         self.mouse_state = OverlayMouseState()
         self.gesture_sampler = GestureStrokeSampler(app.controller.config.gesture)
+        self.stance_sampler = StanceSampler()
         self.grip_down = False
         self.trigger_down = False
         self.voice_trigger_down = False
+        self.stance_chord_down = False
+        self.last_stance_chord_at = -999.0
+        self.stance_gate_reference_yaw: tuple[float, float, float, float] | None = None
+        self.stance_preview_sample: StanceSample | None = None
+        self.stance_preview_revision = -1
+        self.stance_preview_reference_yaw: tuple[float, float, float, float] | None = None
+        self.stance_preview_started_at = 0.0
         self.overlay_visible = True
         self.keyboard_request: SteamVrKeyboardRequest | None = None
         self.keyboard_user_value = 2001
@@ -380,6 +424,12 @@ class OpenVrOverlayRunner:
             self.config.gesture_trail_texture_size,
             self.config.gesture_trail_texture_size,
             self.config.gesture_trail_width_m,
+        )
+        self.stance_left_preview_texture = HandGizmoOverlayTexture(
+            (70, 150, 255, 235)
+        )
+        self.stance_right_preview_texture = HandGizmoOverlayTexture(
+            (255, 80, 90, 235)
         )
         try:
             assert self.overlay_handle is not None
@@ -409,6 +459,7 @@ class OpenVrOverlayRunner:
     def shutdown(self) -> None:
         self.app.controller.set_voice_recording(False)
         self.app.controller.set_gesture_drawing(False)
+        self.app.controller.set_stance_casting(False)
         self._hide_keyboard()
         if self.vr_overlay is not None and self.overlay_handle is not None:
             try:
@@ -420,9 +471,21 @@ class OpenVrOverlayRunner:
                 self.vr_overlay.destroyOverlay(self.trail_overlay_handle)
             except Exception:
                 LOGGER.debug("Failed to destroy gesture trail overlay", exc_info=True)
+        if self.vr_overlay is not None:
+            for handle in self._stance_preview_overlay_handles():
+                try:
+                    self.vr_overlay.destroyOverlay(handle)
+                except Exception:
+                    LOGGER.debug("Failed to destroy stance preview overlay", exc_info=True)
         if self.trail_texture is not None:
             self.trail_texture.shutdown()
             self.trail_texture = None
+        if self.stance_left_preview_texture is not None:
+            self.stance_left_preview_texture.shutdown()
+            self.stance_left_preview_texture = None
+        if self.stance_right_preview_texture is not None:
+            self.stance_right_preview_texture.shutdown()
+            self.stance_right_preview_texture = None
         if self.renderer is not None:
             self.renderer.shutdown()
             self.renderer = None
@@ -453,6 +516,22 @@ class OpenVrOverlayRunner:
             self.trail_overlay_handle = self.vr_overlay.createOverlay(
                 TRAIL_OVERLAY_KEY, TRAIL_OVERLAY_NAME
             )
+            self.stance_left_preview_overlay_handle = self.vr_overlay.createOverlay(
+                "space.hiina.osc_grimoire.stance_left_preview",
+                "OSC Grimoire Stance Left Preview",
+            )
+            self.stance_left_preview_back_overlay_handle = self.vr_overlay.createOverlay(
+                "space.hiina.osc_grimoire.stance_left_preview_back",
+                "OSC Grimoire Stance Left Preview Back",
+            )
+            self.stance_right_preview_overlay_handle = self.vr_overlay.createOverlay(
+                "space.hiina.osc_grimoire.stance_right_preview",
+                "OSC Grimoire Stance Right Preview",
+            )
+            self.stance_right_preview_back_overlay_handle = self.vr_overlay.createOverlay(
+                "space.hiina.osc_grimoire.stance_right_preview_back",
+                "OSC Grimoire Stance Right Preview Back",
+            )
             mouse_scale = openvr.HmdVector2_t()
             mouse_scale.v[0] = float(self.config.texture_width)
             mouse_scale.v[1] = float(self.config.texture_height)
@@ -466,6 +545,12 @@ class OpenVrOverlayRunner:
             self.vr_overlay.setOverlayWidthInMeters(
                 self.trail_overlay_handle, self.config.gesture_trail_width_m
             )
+            for handle in self._stance_preview_overlay_handles():
+                self.vr_overlay.setOverlayWidthInMeters(
+                    handle,
+                    self.app.controller.config.stance.preview_gizmo_size_m,
+                )
+                self.vr_overlay.hideOverlay(handle)
             self.vr_overlay.showOverlay(self.overlay_handle)
             self.overlay_visible = True
         except Exception as exc:
@@ -633,10 +718,13 @@ class OpenVrOverlayRunner:
         assert self.vr_system is not None
         assert self.vr_overlay is not None
         assert self.overlay_handle is not None
+        now = time.monotonic()
         input_state = self._input_state()
         if input_state is None:
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self._cancel_gesture_capture()
+            self._cancel_stance_recording()
+            self._reset_stance_gate()
             self.trigger_down = False
             return
         if self._digital_action_pressed("ui_toggle"):
@@ -652,6 +740,8 @@ class OpenVrOverlayRunner:
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self._cancel_gesture_capture()
+            self._cancel_stance_recording()
+            self._reset_stance_gate()
             self.trigger_down = input_state.trigger_down
             return
 
@@ -663,6 +753,8 @@ class OpenVrOverlayRunner:
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self._cancel_gesture_capture()
+            self._cancel_stance_recording()
+            self._reset_stance_gate()
             self.trigger_down = input_state.trigger_down
             return
         if not input_state.pose.bPoseIsValid:
@@ -671,17 +763,39 @@ class OpenVrOverlayRunner:
                 self.voice_trigger_down = False
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self._cancel_gesture_capture()
+            self._cancel_stance_recording()
+            self._reset_stance_gate()
+            self.trigger_down = input_state.trigger_down
+            return
+        self._update_stance_preview(poses, now)
+        if self.app.controller.armed_stance_spell_id is not None:
+            if self.voice_trigger_down:
+                self.app.finish_overlay_voice_recording()
+                self.voice_trigger_down = False
+            self._cancel_gesture_capture()
+            self._update_stance_recording(input_state, poses, now)
+            self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self.trigger_down = input_state.trigger_down
             return
         if self.app.controller.gesture_enabled:
             self._update_gesture_capture(input_state.grip_down, poses, input_state.pose)
         else:
             self._cancel_gesture_capture()
+        if (
+            self.app.controller.stance_enabled
+            and not self.voice_trigger_down
+            and not self.gesture_sampler.active
+            and not input_state.grip_down
+        ):
+            self._update_stance_gate(input_state, poses, now)
+        else:
+            self._reset_stance_gate()
         ray = ray_from_pose(input_state.pose)
         intersection = (
             self._compute_intersection(ray) if self.app.controller.ui_enabled else None
         )
         if self.voice_trigger_down:
+            self._reset_stance_gate()
             self._update_overlay_voice_recording(trigger_pressed, trigger_released)
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self.trigger_down = input_state.trigger_down
@@ -740,6 +854,145 @@ class OpenVrOverlayRunner:
                 self.app.controller.status = str(exc)
         self.grip_down = grip_down
 
+    def _update_stance_recording(
+        self, input_state: OpenVrInputState, poses: Any, now: float
+    ) -> None:
+        assert self.openvr is not None
+        tracking = self._stance_tracking_poses(input_state, poses)
+        if tracking is None:
+            self.app.controller.status = "Waiting for stance tracking..."
+            return
+        hmd_pose, left_pose, right_pose = tracking
+        both_triggers = input_state.left_trigger_down and input_state.right_trigger_down
+        debounce_s = self.app.controller.config.stance.record_chord_debounce_s
+        chord_pressed = (
+            both_triggers
+            and not self.stance_chord_down
+            and float(now) - self.last_stance_chord_at >= debounce_s
+        )
+        if chord_pressed:
+            self.last_stance_chord_at = float(now)
+            if not self.stance_sampler.active:
+                self.stance_sampler.begin(
+                    now=now,
+                    hmd_matrix=hmd_pose.mDeviceToAbsoluteTracking,
+                    left_matrix=left_pose.mDeviceToAbsoluteTracking,
+                    right_matrix=right_pose.mDeviceToAbsoluteTracking,
+                )
+                self.app.controller.status = "Recording stance..."
+            else:
+                sample = self.stance_sampler.finish(
+                    now=now,
+                    hmd_matrix=hmd_pose.mDeviceToAbsoluteTracking,
+                    left_matrix=left_pose.mDeviceToAbsoluteTracking,
+                    right_matrix=right_pose.mDeviceToAbsoluteTracking,
+                )
+                try:
+                    result = self.app.controller.handle_stance_sample(sample)
+                    self.app.open_spell_after_gesture_action(result)
+                except Exception as exc:
+                    LOGGER.exception("Stance action failed")
+                    self.app.controller.status = str(exc)
+        elif self.stance_sampler.active:
+            self.stance_sampler.add_frame(
+                now=now,
+                hmd_matrix=hmd_pose.mDeviceToAbsoluteTracking,
+                left_matrix=left_pose.mDeviceToAbsoluteTracking,
+                right_matrix=right_pose.mDeviceToAbsoluteTracking,
+            )
+        self.stance_chord_down = both_triggers
+
+    def _cancel_stance_recording(self) -> None:
+        if self.stance_sampler.active:
+            self.stance_sampler.cancel()
+        self.stance_chord_down = False
+
+    def _reset_stance_gate(self) -> None:
+        self.stance_gate_reference_yaw = None
+        self.app.controller.reset_stance_gate()
+
+    def _update_stance_gate(
+        self, input_state: OpenVrInputState, poses: Any, now: float
+    ) -> None:
+        tracking = self._stance_tracking_poses(input_state, poses)
+        if tracking is None:
+            self._reset_stance_gate()
+            return
+        hmd_pose, left_pose, right_pose = tracking
+        left = hmd_yaw_relative_pose(
+            left_pose.mDeviceToAbsoluteTracking,
+            hmd_pose.mDeviceToAbsoluteTracking,
+            reference_yaw=self.stance_gate_reference_yaw,
+        )
+        right = hmd_yaw_relative_pose(
+            right_pose.mDeviceToAbsoluteTracking,
+            hmd_pose.mDeviceToAbsoluteTracking,
+            reference_yaw=self.stance_gate_reference_yaw,
+        )
+        event = self.app.controller.update_stance_tracking(
+            now=now, left=left, right=right
+        )
+        if event.lock_started or (
+            event.casting_started and self.stance_gate_reference_yaw is None
+        ):
+            self.stance_gate_reference_yaw = yaw_reference_from_matrix34(
+                hmd_pose.mDeviceToAbsoluteTracking
+            )
+        if event.casting_ended or event.state == "idle":
+            self.stance_gate_reference_yaw = None
+
+    def _stance_tracking_poses(
+        self, input_state: OpenVrInputState, poses: Any
+    ) -> tuple[Any, Any, Any] | None:
+        assert self.openvr is not None
+        hmd_pose = poses[self.openvr.k_unTrackedDeviceIndex_Hmd]
+        left_pose = input_state.left_pose
+        right_pose = input_state.right_pose
+        if left_pose is None or right_pose is None:
+            return None
+        if (
+            not hmd_pose.bPoseIsValid
+            or not left_pose.bPoseIsValid
+            or not right_pose.bPoseIsValid
+        ):
+            return None
+        return hmd_pose, left_pose, right_pose
+
+    def _update_stance_preview(self, poses: Any, now: float) -> None:
+        revision, requested = self.app.controller.stance_preview_state()
+        if revision != self.stance_preview_revision:
+            self.stance_preview_revision = revision
+            self.stance_preview_sample = requested
+            self.stance_preview_reference_yaw = None
+            self.stance_preview_started_at = float(now)
+            if requested is None:
+                self._hide_stance_preview_overlays()
+            else:
+                self._show_stance_preview_overlays()
+        sample = self.stance_preview_sample
+        if sample is None:
+            return
+        duration = max(sample.duration_s, 0.05)
+        elapsed = (float(now) - self.stance_preview_started_at) % duration
+        frame = interpolate_stance_frame(sample, elapsed)
+        if frame is None:
+            self._hide_stance_preview_overlays()
+            self.stance_preview_sample = None
+            self.stance_preview_reference_yaw = None
+            return
+        assert self.openvr is not None
+        hmd_pose = poses[self.openvr.k_unTrackedDeviceIndex_Hmd]
+        if not hmd_pose.bPoseIsValid:
+            return
+        if self.stance_preview_reference_yaw is None:
+            self.stance_preview_reference_yaw = yaw_reference_from_matrix34(
+                hmd_pose.mDeviceToAbsoluteTracking
+            )
+        self._set_stance_preview_pose(
+            frame,
+            hmd_pose.mDeviceToAbsoluteTracking,
+        )
+
     def _update_overlay_voice_recording(
         self, trigger_pressed: bool, trigger_released: bool
     ) -> None:
@@ -784,14 +1037,26 @@ class OpenVrOverlayRunner:
         if not self._update_action_state():
             return None
         hand = self.config.pointer_hand
-        digital_data = self._digital_action_data(f"{hand}_trigger")
-        if digital_data is None:
+        pointer_trigger_data = self._digital_action_data(f"{hand}_trigger")
+        if pointer_trigger_data is None:
             return None
+        left_trigger = self._digital_action_data("left_trigger")
+        right_trigger = self._digital_action_data("right_trigger")
         return OpenVrInputState(
-            trigger_down=bool(digital_data.bActive and digital_data.bState),
-            trigger_changed=bool(digital_data.bActive and digital_data.bChanged),
+            trigger_down=bool(
+                pointer_trigger_data.bActive and pointer_trigger_data.bState
+            ),
+            trigger_changed=bool(
+                pointer_trigger_data.bActive and pointer_trigger_data.bChanged
+            ),
             grip_down=self._digital_action_state(f"{hand}_grip"),
             pose=self._pose_action(hand),
+            left_trigger_down=_digital_pressed(left_trigger),
+            right_trigger_down=_digital_pressed(right_trigger),
+            left_grip_down=self._digital_action_state("left_grip"),
+            right_grip_down=self._digital_action_state("right_grip"),
+            left_pose=self._pose_action("left"),
+            right_pose=self._pose_action("right"),
         )
 
     def _update_action_state(self) -> bool:
@@ -846,11 +1111,7 @@ class OpenVrOverlayRunner:
         assert self.vr_input is not None
         assert self.action_handles is not None
         handle = getattr(self.action_handles, name)
-        source = (
-            self.openvr.k_ulInvalidInputValueHandle
-            if name == "ui_toggle"
-            else self._action_source_handle()
-        )
+        source = self._action_source_handle_for_name(name)
         try:
             return self.vr_input.getDigitalActionData(
                 handle,
@@ -871,20 +1132,31 @@ class OpenVrOverlayRunner:
             pose_data = self.vr_input.getPoseActionDataForNextFrame(
                 pose_handle,
                 self.openvr.TrackingUniverseStanding,
-                self._action_source_handle(),
+                getattr(self.action_handles, f"{hand}_source"),
             )
         except Exception as exc:
             if self._is_openvr_input_no_data(exc):
                 self.app.controller.status = "Waiting for SteamVR input data..."
-                return self._fallback_pointer_pose()
+                return self._fallback_pose(hand)
             raise
         if pose_data.bActive and pose_data.pose.bPoseIsValid:
             return pose_data.pose
-        return self._fallback_pointer_pose()
+        return self._fallback_pose(hand)
 
     def _action_source_handle(self) -> int:
         assert self.action_handles is not None
         return getattr(self.action_handles, f"{self.config.pointer_hand}_source")
+
+    def _action_source_handle_for_name(self, name: str) -> int:
+        assert self.openvr is not None
+        assert self.action_handles is not None
+        if name == "ui_toggle":
+            return self.openvr.k_ulInvalidInputValueHandle
+        if name.startswith("left_"):
+            return self.action_handles.left_source
+        if name.startswith("right_"):
+            return self.action_handles.right_source
+        return self._action_source_handle()
 
     def _show_gesture_trail(self) -> None:
         assert self.vr_overlay is not None
@@ -899,6 +1171,79 @@ class OpenVrOverlayRunner:
         if self.trail_texture is not None:
             self.trail_texture.clear()
         self.vr_overlay.hideOverlay(self.trail_overlay_handle)
+
+    def _show_stance_preview_overlays(self) -> None:
+        if self.vr_overlay is None:
+            return
+        for handle in self._stance_preview_overlay_handles():
+            self.vr_overlay.showOverlay(handle)
+        self._submit_stance_preview_textures()
+
+    def _hide_stance_preview_overlays(self) -> None:
+        self.stance_preview_reference_yaw = None
+        if self.vr_overlay is None:
+            return
+        for handle in self._stance_preview_overlay_handles():
+            self.vr_overlay.hideOverlay(handle)
+
+    def _stance_preview_overlay_handles(self) -> tuple[int, ...]:
+        return tuple(
+            handle
+            for handle in (
+                self.stance_left_preview_overlay_handle,
+                self.stance_left_preview_back_overlay_handle,
+                self.stance_right_preview_overlay_handle,
+                self.stance_right_preview_back_overlay_handle,
+            )
+            if handle is not None
+        )
+
+    def _set_stance_preview_pose(self, frame: StanceFrame, hmd_matrix: Any) -> None:
+        assert self.openvr is not None
+        assert self.vr_overlay is not None
+        assert self.stance_left_preview_overlay_handle is not None
+        assert self.stance_right_preview_overlay_handle is not None
+        left_abs = absolute_pose_from_hmd_yaw_relative(
+            frame.left,
+            hmd_matrix,
+            reference_yaw=self.stance_preview_reference_yaw,
+        )
+        right_abs = absolute_pose_from_hmd_yaw_relative(
+            frame.right,
+            hmd_matrix,
+            reference_yaw=self.stance_preview_reference_yaw,
+        )
+        self._set_stance_preview_hand_pose(
+            self.stance_left_preview_overlay_handle,
+            self.stance_left_preview_back_overlay_handle,
+            left_abs,
+        )
+        self._set_stance_preview_hand_pose(
+            self.stance_right_preview_overlay_handle,
+            self.stance_right_preview_back_overlay_handle,
+            right_abs,
+        )
+
+    def _set_stance_preview_hand_pose(
+        self,
+        front_handle: int | None,
+        back_handle: int | None,
+        pose,
+    ) -> None:
+        assert self.openvr is not None
+        assert self.vr_overlay is not None
+        if front_handle is not None:
+            self.vr_overlay.setOverlayTransformAbsolute(
+                front_handle,
+                self.openvr.TrackingUniverseStanding,
+                matrix34_from_pose(self.openvr, pose),
+            )
+        if back_handle is not None:
+            self.vr_overlay.setOverlayTransformAbsolute(
+                back_handle,
+                self.openvr.TrackingUniverseStanding,
+                _backface_overlay_matrix_from_pose(self.openvr, pose),
+            )
 
     def _update_gesture_trail(self) -> None:
         if self.trail_texture is None:
@@ -991,6 +1336,41 @@ class OpenVrOverlayRunner:
         )
         self.vr_overlay.setOverlayTexture(self.trail_overlay_handle, texture)
 
+    def _submit_stance_preview_textures(self) -> None:
+        if (
+            self.openvr is None
+            or self.vr_overlay is None
+            or self.stance_left_preview_texture is None
+            or self.stance_right_preview_texture is None
+        ):
+            return
+        left_texture = self.openvr.Texture_t(
+            ctypes.c_void_p(int(self.stance_left_preview_texture.texture_id)),
+            self.openvr.TextureType_OpenGL,
+            self.openvr.ColorSpace_Auto,
+        )
+        right_texture = self.openvr.Texture_t(
+            ctypes.c_void_p(int(self.stance_right_preview_texture.texture_id)),
+            self.openvr.TextureType_OpenGL,
+            self.openvr.ColorSpace_Auto,
+        )
+        if self.stance_left_preview_overlay_handle is not None:
+            self.vr_overlay.setOverlayTexture(
+                self.stance_left_preview_overlay_handle, left_texture
+            )
+        if self.stance_left_preview_back_overlay_handle is not None:
+            self.vr_overlay.setOverlayTexture(
+                self.stance_left_preview_back_overlay_handle, left_texture
+            )
+        if self.stance_right_preview_overlay_handle is not None:
+            self.vr_overlay.setOverlayTexture(
+                self.stance_right_preview_overlay_handle, right_texture
+            )
+        if self.stance_right_preview_back_overlay_handle is not None:
+            self.vr_overlay.setOverlayTexture(
+                self.stance_right_preview_back_overlay_handle, right_texture
+            )
+
     def _overlay_device_index(self) -> int:
         assert self.openvr is not None
         assert self.vr_system is not None
@@ -1000,7 +1380,10 @@ class OpenVrOverlayRunner:
         return self._device_index_for_hand(self.config.pointer_hand)
 
     def _fallback_pointer_pose(self) -> Any | None:
-        device_index = self._pointer_device_index()
+        return self._fallback_pose(self.config.pointer_hand)
+
+    def _fallback_pose(self, hand: str) -> Any | None:
+        device_index = self._device_index_for_hand(hand)
         if device_index == self.openvr.k_unTrackedDeviceIndexInvalid:
             return None
         poses = self._tracked_device_poses()
@@ -1336,8 +1719,73 @@ class StrokeTrailTexture:
         )
 
 
+class HandGizmoOverlayTexture:
+    def __init__(
+        self,
+        hand_color: tuple[int, int, int, int],
+        *,
+        width: int = 96,
+        height: int = 96,
+    ) -> None:
+        self.width = width
+        self.height = height
+        self.texture_id = 0
+        self._pixels = np.zeros((height, width, 4), dtype=np.uint8)
+        center = (width // 2, height // 2)
+        finger_tip = (center[0], int(height * 0.08))
+        palm_left = (int(width * 0.24), center[1])
+        palm_right = (int(width * 0.76), center[1])
+        shadow = (8, 7, 10, 190)
+        finger_color = (72, 255, 120, 245)
+        palm_color = (255, 86, 82, 245)
+        _draw_line(self._pixels, center, finger_tip, radius=5, color=shadow)
+        _draw_line(self._pixels, palm_left, palm_right, radius=5, color=shadow)
+        _draw_line(self._pixels, center, finger_tip, radius=2, color=finger_color)
+        _draw_line(self._pixels, palm_left, palm_right, radius=2, color=palm_color)
+        _draw_point(self._pixels, finger_tip, radius=4, color=finger_color)
+        _draw_point(self._pixels, palm_left, radius=3, color=palm_color)
+        _draw_point(self._pixels, palm_right, radius=3, color=palm_color)
+        _draw_point(self._pixels, center, radius=7, color=shadow)
+        _draw_point(self._pixels, center, radius=5, color=hand_color)
+        self._init_texture()
+
+    def shutdown(self) -> None:
+        if not self.texture_id:
+            return
+        import OpenGL.GL as gl
+
+        gl.glDeleteTextures([self.texture_id])
+        self.texture_id = 0
+
+    def _init_texture(self) -> None:
+        import OpenGL.GL as gl
+
+        self.texture_id = int(gl.glGenTextures(1))
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_id)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexImage2D(
+            gl.GL_TEXTURE_2D,
+            0,
+            gl.GL_RGBA8,
+            self.width,
+            self.height,
+            0,
+            gl.GL_RGBA,
+            gl.GL_UNSIGNED_BYTE,
+            self._pixels,
+        )
+
+
 def _draw_line(
-    pixels: np.ndarray, start: tuple[int, int], end: tuple[int, int], *, radius: int
+    pixels: np.ndarray,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    *,
+    radius: int,
+    color: tuple[int, int, int, int] = (64, 255, 96, 230),
 ) -> None:
     x0, y0 = start
     x1, y1 = end
@@ -1347,7 +1795,7 @@ def _draw_line(
     sy = 1 if y0 < y1 else -1
     error = dx + dy
     while True:
-        _draw_point(pixels, (x0, y0), radius=radius)
+        _draw_point(pixels, (x0, y0), radius=radius, color=color)
         if x0 == x1 and y0 == y1:
             return
         double_error = 2 * error
@@ -1359,13 +1807,19 @@ def _draw_line(
             y0 += sy
 
 
-def _draw_point(pixels: np.ndarray, point: tuple[int, int], *, radius: int) -> None:
+def _draw_point(
+    pixels: np.ndarray,
+    point: tuple[int, int],
+    *,
+    radius: int,
+    color: tuple[int, int, int, int] = (64, 255, 96, 230),
+) -> None:
     x, y = point
     height, width = pixels.shape[:2]
     for py in range(max(0, y - radius), min(height, y + radius + 1)):
         for px in range(max(0, x - radius), min(width, x + radius + 1)):
             if (px - x) * (px - x) + (py - y) * (py - y) <= radius * radius:
-                pixels[py, px] = (64, 255, 96, 230)
+                pixels[py, px] = color
 
 
 def _keyboard_event_text(event: Any) -> str:

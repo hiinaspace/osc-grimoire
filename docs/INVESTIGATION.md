@@ -118,6 +118,6 @@ preserved in git at commit `87e579f` (`Add faster-whisper diagnostic backend`).
 - Nonsense words can tokenize and score well with Parakeet, but some spell names
   may be consistently heard as nearby ordinary words. The incantation UI handles
   this by letting users add those heard phrases as accepted spell incantations.
-- The current app scores voice and gesture independently. A future combined
-  voice+gesture confidence model might help similar spells, but the current
-  explicit gates are easier to tune and debug.
+- The current app scores voice, gesture, and stance independently. A future
+  combined confidence model might help similar spells, but the current explicit
+  gates are easier to tune and debug.

@@ -73,6 +73,10 @@ def fizzle_osc_parameter_name(config: OscConfig) -> str:
     return f"{config.parameter_prefix}Fizzle"
 
 
+def stance_start_osc_parameter_name(config: OscConfig) -> str:
+    return f"{config.parameter_prefix}StanceStart"
+
+
 def discover_osc_target(config: OscConfig) -> OscTarget:
     try:
         from pythonoscquery.osc_query_browser import OSCQueryBrowser, OSCQueryClient
@@ -224,6 +228,9 @@ class OscOutput:
     def set_gesture_drawing(self, drawing: bool) -> None:
         self.send_bool(f"{self.config.parameter_prefix}GestureDrawing", drawing)
 
+    def set_stance_casting(self, casting: bool) -> None:
+        self.send_bool(f"{self.config.parameter_prefix}StanceCasting", casting)
+
     def set_ui_enabled(self, enabled: bool) -> None:
         self.send_bool(f"{self.config.parameter_prefix}UIEnabled", enabled)
 
@@ -233,12 +240,24 @@ class OscOutput:
     def set_gesture_enabled(self, enabled: bool) -> None:
         self.send_bool(f"{self.config.parameter_prefix}GestureEnabled", enabled)
 
+    def set_stance_enabled(self, enabled: bool) -> None:
+        self.send_bool(f"{self.config.parameter_prefix}StanceEnabled", enabled)
+
     def set_enable_toggles(
-        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+        self,
+        *,
+        ui_enabled: bool,
+        gesture_enabled: bool,
+        voice_enabled: bool,
+        stance_enabled: bool,
     ) -> None:
         self.set_ui_enabled(ui_enabled)
         self.set_gesture_enabled(gesture_enabled)
         self.set_voice_enabled(voice_enabled)
+        self.set_stance_enabled(stance_enabled)
+
+    def pulse_stance_start(self) -> None:
+        self.pulse_bool(stance_start_osc_parameter_name(self.config))
 
     def pulse_spell(self, spell: Spell) -> None:
         on_cast, after_cast = spell_osc_actions(spell, self.config)

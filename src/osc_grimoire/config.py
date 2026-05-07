@@ -31,6 +31,19 @@ class GestureRecognitionConfig:
 
 
 @dataclass(frozen=True)
+class StanceRecognitionConfig:
+    start_hold_s: float = 0.5
+    end_hold_s: float = 0.25
+    active_timeout_s: float = 1.0
+    start_position_tolerance_m: float = 0.20
+    start_orientation_tolerance_rad: float = 0.75
+    end_position_tolerance_m: float = 0.15
+    end_orientation_tolerance_rad: float = 0.55
+    record_chord_debounce_s: float = 0.20
+    preview_gizmo_size_m: float = 0.10
+
+
+@dataclass(frozen=True)
 class OpenVrOverlayConfig:
     overlay_hand: str = "left"
     pointer_hand: str = "right"
@@ -65,6 +78,7 @@ class AppConfig:
     audio: AudioConfig = field(default_factory=AudioConfig)
     voice: VoiceRecognitionConfig = field(default_factory=VoiceRecognitionConfig)
     gesture: GestureRecognitionConfig = field(default_factory=GestureRecognitionConfig)
+    stance: StanceRecognitionConfig = field(default_factory=StanceRecognitionConfig)
     openvr: OpenVrOverlayConfig = field(default_factory=OpenVrOverlayConfig)
     osc: OscConfig = field(default_factory=OscConfig)
     hotkey: str = "space"

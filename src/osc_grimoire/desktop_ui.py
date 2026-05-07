@@ -15,12 +15,16 @@ from .desktop_controller import (
     GestureResult,
     GrimoireController,
     RecognitionResult,
+    StanceResult,
 )
 from .gesture_recognizer import GestureRanking
 from .osc_input import OscInputService
 from .osc_output import OscOutput, spell_osc_actions
 from .paths import default_data_dir
 from .spellbook import Spell, format_osc_actions, parse_osc_actions
+from .stance_capture import StanceSample, looping_stance_frame
+from .stance_gate import StanceRanking
+from .stance_geometry import Pose, matrix_from_quaternion
 from .voice_features import FloatArray
 
 LOGGER = logging.getLogger(__name__)
@@ -72,6 +76,7 @@ class DesktopVoiceUi:
         self.delete_confirm_ready_at = 0.0
         self.delete_confirm_expires_at = 0.0
         self.suppress_add_spell_until_mouse_up = False
+        self.local_stance_preview_spell_id: str | None = None
         self._last_logged_input_status: str | None = None
         self._last_logged_output_status: str | None = None
         self._implot_context_created = False
@@ -109,6 +114,7 @@ class DesktopVoiceUi:
             window_flags,
         )
         self._draw_nav()
+        self._stop_stance_preview_when_page_hidden()
         imgui.separator()
         if self.page == PAGE_MAIN:
             self._draw_main_page()
@@ -211,6 +217,10 @@ class DesktopVoiceUi:
             self._draw_gesture_preview(
                 "Latest Gesture", self.controller.latest_gesture_points
             )
+        if self.controller.latest_stance_sample is not None:
+            self._draw_stance_preview(
+                "Latest Stance", self.controller.latest_stance_sample
+            )
         imgui.end_table()
 
     def _draw_main_empty_state(self) -> None:
@@ -282,6 +292,7 @@ class DesktopVoiceUi:
     def _draw_spell_row_match(self, spell: Spell) -> None:
         latest_voice = self.controller.last_result
         latest_gesture = self.controller.last_gesture_result
+        latest_stance = self.controller.last_stance_result
         if self.controller.last_match_kind == "voice" and latest_voice is not None:
             row = _voice_ranking_for_spell(latest_voice, spell.id)
             if row is not None:
@@ -332,6 +343,26 @@ class DesktopVoiceUi:
                     state=state,
                     size=(260, 14),
                 )
+            return
+        if self.controller.last_match_kind == "stance" and latest_stance is not None:
+            row = _stance_ranking_for_spell(latest_stance, spell.id)
+            if row is not None:
+                state = (
+                    "accepted"
+                    if latest_stance.decision.accepted
+                    and latest_stance.decision.best_spell_id == spell.id
+                    else "muted"
+                    if latest_stance.decision.accepted
+                    else "rejected"
+                )
+                self._draw_threshold_bar(
+                    1.0 / (1.0 + row.score),
+                    0.0,
+                    label="stance",
+                    show_marker=False,
+                    state=state,
+                    size=(260, 14),
+                )
 
     def _draw_spell_page(self) -> None:
         from imgui_bundle import imgui
@@ -364,12 +395,17 @@ class DesktopVoiceUi:
         imgui.table_next_column()
         if spell is not None:
             self._draw_saved_gesture_section(spell)
+            self._draw_saved_stance_section(spell)
         elif self.controller.draft is not None:
             self._draw_draft_gesture_guidance()
         if self.controller.latest_gesture_points is not None:
             self._draw_gesture_preview(
                 "Latest Gesture", self.controller.latest_gesture_points
             )
+        if spell is not None:
+            stance = self.controller.stance_preview(spell)
+            if stance is not None:
+                self._draw_stance_preview("Saved Stance", stance)
         imgui.end_table()
 
     def _draw_spell_controls(self, spell: Spell | None) -> None:
@@ -831,6 +867,27 @@ class DesktopVoiceUi:
             self.controller.clear_gesture_sample(spell.id)
         self._draw_gesture_canvas(self.controller.gesture_preview(spell))
 
+    def _draw_saved_stance_section(self, spell: Spell) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text("Stance")
+        imgui.same_line()
+        if imgui.button("Record Stance"):
+            self.controller.arm_stance_recording(spell.id)
+        imgui.same_line()
+        if imgui.button("Clear Stance"):
+            self.controller.clear_stance_sample(spell.id)
+        imgui.same_line()
+        preview_enabled = self.controller.stance_preview_enabled(spell.id)
+        changed, preview_enabled = imgui.checkbox("Preview in VR", preview_enabled)
+        if changed:
+            try:
+                self.controller.set_stance_preview_enabled(spell.id, preview_enabled)
+                self.local_stance_preview_spell_id = spell.id if preview_enabled else None
+            except ValueError as exc:
+                self.controller.status = str(exc)
+
     def _draw_delete_spell_controls(self, spell: Spell) -> None:
         from imgui_bundle import imgui
 
@@ -944,6 +1001,12 @@ class DesktopVoiceUi:
             f"{prefix}GestureDrawing", "true while gesture is drawing."
         )
         self._draw_osc_help_parameter(
+            f"{prefix}StanceCasting", "true while stance detection is active."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}StanceStart", "brief pulse when a stance start pose locks."
+        )
+        self._draw_osc_help_parameter(
             f"{prefix}Fizzle", "brief pulse when recognition rejects."
         )
         self._draw_osc_help_parameter(
@@ -959,6 +1022,9 @@ class DesktopVoiceUi:
         )
         self._draw_osc_help_parameter(
             f"{prefix}VoiceEnabled", "enable or disable voice input."
+        )
+        self._draw_osc_help_parameter(
+            f"{prefix}StanceEnabled", "enable or disable stance input."
         )
 
         imgui.separator()
@@ -1042,6 +1108,10 @@ class DesktopVoiceUi:
         if gesture_result is not None:
             imgui.separator()
             imgui.text_unformatted(gesture_result.debug_text)
+        stance_result = self.controller.last_stance_result
+        if stance_result is not None:
+            imgui.separator()
+            imgui.text_unformatted(stance_result.debug_text)
 
     def _draw_latest_score_panel(self) -> None:
         from imgui_bundle import imgui
@@ -1058,6 +1128,12 @@ class DesktopVoiceUi:
             and self.controller.last_gesture_result is not None
         ):
             self._draw_gesture_score_panel(self.controller.last_gesture_result)
+            return
+        if (
+            self.controller.last_match_kind == "stance"
+            and self.controller.last_stance_result is not None
+        ):
+            self._draw_stance_score_panel(self.controller.last_stance_result)
             return
         imgui.text_disabled("No match attempts yet.")
 
@@ -1135,6 +1211,34 @@ class DesktopVoiceUi:
                 f"Too close to choose: {result.ranking[0].name} / "
                 f"{result.ranking[1].name}"
             )
+
+    def _draw_stance_score_panel(self, result: StanceResult) -> None:
+        from imgui_bundle import imgui
+
+        imgui.text(
+            "Stance accepted" if result.decision.accepted else "Stance rejected/fizzle"
+        )
+        if not result.ranking:
+            imgui.text_disabled(result.decision.reason)
+            return
+        for row in result.ranking:
+            state = (
+                "accepted"
+                if result.decision.accepted
+                and result.decision.best_spell_id == row.spell_id
+                else "muted"
+                if result.decision.accepted
+                else "rejected"
+            )
+            self._draw_threshold_bar(
+                1.0 / (1.0 + row.score),
+                0.0,
+                label=f"{row.name} {row.phase}",
+                show_marker=False,
+                state=state,
+            )
+        if not result.decision.accepted:
+            imgui.text_disabled(result.decision.reason)
 
     def _draw_threshold_bar(
         self,
@@ -1257,6 +1361,11 @@ class DesktopVoiceUi:
         changed, gesture_enabled = imgui.checkbox("Gesture", gesture_enabled)
         if changed:
             self.controller.set_gesture_enabled(gesture_enabled)
+        imgui.same_line()
+        stance_enabled = self.controller.stance_enabled
+        changed, stance_enabled = imgui.checkbox("Stance", stance_enabled)
+        if changed:
+            self.controller.set_stance_enabled(stance_enabled)
         imgui.same_line()
         imgui.text_disabled(summary)
 
@@ -1394,6 +1503,10 @@ class DesktopVoiceUi:
             return f"{self.recording_mode}: recording"
         if self.controller.armed_gesture_spell_id is not None:
             return "gesture: armed"
+        if self.controller.armed_stance_spell_id is not None:
+            return "stance: armed"
+        if self.controller.stance_gate.active:
+            return "stance: casting"
         return self.controller.status
 
     def _osc_status_summary(self) -> str:
@@ -1438,6 +1551,22 @@ class DesktopVoiceUi:
         index = pages.index(self.page) if self.page in pages else 0
         self.page = pages[(index + 1) % len(pages)]
         self._sync_selection_to_page()
+
+    def _stop_stance_preview_when_page_hidden(self) -> None:
+        preview_spell_id = self.local_stance_preview_spell_id
+        if preview_spell_id is None:
+            return
+        if self.controller.active_stance_preview_spell_id != preview_spell_id:
+            self.local_stance_preview_spell_id = None
+            return
+        visible_spell = self._selected_spell() if self.page > PAGE_MAIN else None
+        if visible_spell is not None and visible_spell.id == preview_spell_id:
+            return
+        try:
+            self.controller.set_stance_preview_enabled(preview_spell_id, False)
+        except ValueError:
+            pass
+        self.local_stance_preview_spell_id = None
 
     def _ordered_pages(self) -> list[int]:
         spell_pages = list(range(1, len(self.controller.spellbook.spells) + 1))
@@ -1486,6 +1615,18 @@ class DesktopVoiceUi:
         imgui.text(label)
         self._draw_gesture_canvas(points, size=size)
 
+    def _draw_stance_preview(
+        self,
+        label: str,
+        sample: StanceSample | None,
+        size: tuple[float, float] = (260, 170),
+    ) -> None:
+        from imgui_bundle import imgui
+
+        imgui.separator()
+        imgui.text(label)
+        self._draw_stance_canvas(sample, size=size)
+
     def _draw_gesture_canvas(
         self,
         points: FloatArray | None,
@@ -1525,6 +1666,144 @@ class DesktopVoiceUi:
             )
             draw_list.add_text(text_pos, text_color, "(none)")
         imgui.dummy(imgui.ImVec2(draw_size.x, draw_size.y + 6.0))
+
+    def _draw_stance_canvas(
+        self,
+        sample: StanceSample | None,
+        size: tuple[float, float] = (320, 190),
+    ) -> None:
+        from imgui_bundle import imgui
+
+        if sample is None or not sample.frames:
+            draw_size = imgui.ImVec2(size[0], size[1])
+            origin = imgui.get_cursor_screen_pos()
+            draw_list = imgui.get_window_draw_list()
+            bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.08, 0.07, 0.10, 1.0))
+            text_pos = imgui.ImVec2(origin.x + 12.0, origin.y + draw_size.y * 0.45)
+            text_color = imgui.color_convert_float4_to_u32(
+                imgui.ImVec4(0.55, 0.55, 0.62, 1.0)
+            )
+            draw_list.add_rect_filled(
+                origin,
+                imgui.ImVec2(origin.x + draw_size.x, origin.y + draw_size.y),
+                bg,
+            )
+            draw_list.add_text(text_pos, text_color, "(none)")
+            imgui.dummy(imgui.ImVec2(draw_size.x, draw_size.y + 6.0))
+            return
+        current = looping_stance_frame(sample, time.monotonic())
+        panel_gap = 8.0
+        panel_width = max(110.0, (size[0] - panel_gap) * 0.5)
+        panel_height = size[1]
+        origin = imgui.get_cursor_screen_pos()
+        self._draw_stance_ortho_panel(
+            sample,
+            current,
+            "front",
+            origin,
+            imgui.ImVec2(panel_width, panel_height),
+        )
+        second_origin = imgui.ImVec2(origin.x + panel_width + panel_gap, origin.y)
+        self._draw_stance_ortho_panel(
+            sample,
+            current,
+            "side",
+            second_origin,
+            imgui.ImVec2(panel_width, panel_height),
+        )
+        imgui.dummy(imgui.ImVec2(size[0], size[1] + 6.0))
+
+    def _draw_stance_ortho_panel(
+        self,
+        sample: StanceSample,
+        current,
+        view: str,
+        origin,
+        size,
+    ) -> None:
+        from imgui_bundle import imgui
+
+        draw_list = imgui.get_window_draw_list()
+        bg = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.08, 0.07, 0.10, 1.0))
+        border = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.35, 0.33, 0.42, 1.0))
+        label_color = imgui.color_convert_float4_to_u32(
+            imgui.ImVec4(0.62, 0.62, 0.70, 1.0)
+        )
+        head_color = imgui.color_convert_float4_to_u32(
+            imgui.ImVec4(0.85, 0.85, 0.90, 1.0)
+        )
+        left_color = imgui.color_convert_float4_to_u32(
+            imgui.ImVec4(0.35, 0.65, 1.0, 1.0)
+        )
+        right_color = imgui.color_convert_float4_to_u32(
+            imgui.ImVec4(1.0, 0.35, 0.38, 1.0)
+        )
+        draw_list.add_rect_filled(
+            origin,
+            imgui.ImVec2(origin.x + size.x, origin.y + size.y),
+            bg,
+        )
+        draw_list.add_rect(
+            origin,
+            imgui.ImVec2(origin.x + size.x, origin.y + size.y),
+            border,
+        )
+        draw_list.add_text(
+            imgui.ImVec2(origin.x + 8.0, origin.y + 6.0),
+            label_color,
+            "Front" if view == "front" else "Side",
+        )
+        left_points = [_stance_project_point(frame.left.p, view) for frame in sample.frames]
+        right_points = [
+            _stance_project_point(frame.right.p, view) for frame in sample.frames
+        ]
+        all_points = [*left_points, *right_points, (0.0, 0.0)]
+        mapped = _map_points_to_rect(all_points, origin, size)
+        left_mapped = mapped[: len(left_points)]
+        right_mapped = mapped[len(left_points) : len(left_points) + len(right_points)]
+        for start, end in zip(left_mapped[:-1], left_mapped[1:], strict=False):
+            draw_list.add_line(start, end, left_color, 2.0)
+        for start, end in zip(right_mapped[:-1], right_mapped[1:], strict=False):
+            draw_list.add_line(start, end, right_color, 2.0)
+        draw_list.add_circle_filled(mapped[-1], 5.0, head_color, 16)
+        frame = current or sample.end
+        if frame is not None:
+            self._draw_stance_pose_marker(
+                frame.left, view, origin, size, all_points, left_color
+            )
+            self._draw_stance_pose_marker(
+                frame.right, view, origin, size, all_points, right_color
+            )
+
+    def _draw_stance_pose_marker(
+        self,
+        pose: Pose,
+        view: str,
+        origin,
+        size,
+        reference_points: list[tuple[float, float]],
+        hand_color: int,
+    ) -> None:
+        from imgui_bundle import imgui
+
+        draw_list = imgui.get_window_draw_list()
+        center = _map_points_to_rect(
+            [_stance_project_point(pose.p, view), *reference_points],
+            origin,
+            size,
+        )[0]
+        draw_list.add_circle_filled(center, 4.5, hand_color, 16)
+        rotation = matrix_from_quaternion(pose.q)
+        axis_colors = (
+            imgui.color_convert_float4_to_u32(imgui.ImVec4(0.95, 0.30, 0.30, 1.0)),
+            imgui.color_convert_float4_to_u32(imgui.ImVec4(0.30, 0.90, 0.35, 1.0)),
+            imgui.color_convert_float4_to_u32(imgui.ImVec4(0.35, 0.55, 1.0, 1.0)),
+        )
+        for index, color in enumerate(axis_colors):
+            axis = rotation[:, index]
+            projected = _stance_project_axis(axis, view)
+            end = imgui.ImVec2(center.x + projected[0] * 16.0, center.y - projected[1] * 16.0)
+            draw_list.add_line(center, end, color, 1.8)
 
     def _ensure_implot_context(self) -> None:
         if self._implot_context_created:
@@ -1625,6 +1904,51 @@ def _map_gesture_points_to_rect(points: np.ndarray, origin, size) -> list:
     ]
 
 
+def _stance_point_to_2d(point: tuple[float, float, float]) -> tuple[float, float]:
+    x, y, z = point
+    return (float(x - z * 0.45), float(y + z * 0.25))
+
+
+def _stance_project_point(
+    point: tuple[float, float, float], view: str
+) -> tuple[float, float]:
+    x, y, z = point
+    if view == "side":
+        return (float(-z), float(y))
+    return (float(x), float(y))
+
+
+def _stance_project_axis(axis: np.ndarray, view: str) -> tuple[float, float]:
+    if view == "side":
+        return (float(-axis[2]), float(axis[1]))
+    return (float(axis[0]), float(axis[1]))
+
+
+def _map_points_to_rect(points: list[tuple[float, float]], origin, size) -> list:
+    from imgui_bundle import imgui
+
+    if not points:
+        return []
+    array = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+    minimum = array.min(axis=0)
+    maximum = array.max(axis=0)
+    center = (minimum + maximum) * 0.5
+    span = max(float(np.max(maximum - minimum)), 0.15)
+    scale = min(size.x, size.y) * 0.72 / span
+    mapped = (array - center) * scale
+    canvas_center = np.asarray(
+        [origin.x + size.x * 0.5, origin.y + size.y * 0.55],
+        dtype=np.float32,
+    )
+    return [
+        imgui.ImVec2(
+            float(canvas_center[0] + point[0]),
+            float(canvas_center[1] - point[1]),
+        )
+        for point in mapped
+    ]
+
+
 def _gesture_margin(ranking: tuple[GestureRanking, ...]) -> float | None:
     if len(ranking) < 2:
         return None
@@ -1650,6 +1974,15 @@ def _gesture_margin_conflict(
 def _gesture_ranking_for_spell(
     result: GestureResult, spell_id: str
 ) -> GestureRanking | None:
+    for row in result.ranking:
+        if row.spell_id == spell_id:
+            return row
+    return None
+
+
+def _stance_ranking_for_spell(
+    result: StanceResult, spell_id: str
+) -> StanceRanking | None:
     for row in result.ranking:
         if row.spell_id == spell_id:
             return row

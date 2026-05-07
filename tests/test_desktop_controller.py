@@ -11,11 +11,14 @@ from osc_grimoire.config import (
     AppConfig,
     AudioConfig,
     GestureRecognitionConfig,
+    StanceRecognitionConfig,
     VoiceRecognitionConfig,
 )
 from osc_grimoire.desktop_controller import GrimoireController
 from osc_grimoire.gesture_recognizer import load_gesture_points
 from osc_grimoire.spellbook import PRESET_SPELL_NAMES, OscAction, load_spellbook
+from osc_grimoire.stance_capture import StanceFrame, StanceSample, load_stance_sample
+from osc_grimoire.stance_geometry import Pose
 from osc_grimoire.voice_features import FloatArray
 from osc_grimoire.voice_recognizer import TextHypothesis, VoiceTemplateBackend
 from osc_grimoire.waveform import downsample_waveform, load_waveform_preview
@@ -175,15 +178,19 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
 
     controller.set_voice_enabled(False)
     controller.set_gesture_enabled(False)
+    controller.set_stance_enabled(False)
     controller.set_ui_enabled(False)
 
     assert osc_input.voice_enabled is False
     assert osc_input.gesture_enabled is False
+    assert osc_input.stance_enabled is False
     assert osc_input.ui_enabled is False
     assert not controller.voice_enabled
     assert not controller.gesture_enabled
+    assert not controller.stance_enabled
     assert output.voice_enabled == [False]
     assert output.gesture_enabled == [False]
+    assert output.stance_enabled == [False]
     assert output.ui_enabled == [False]
 
 
@@ -311,6 +318,134 @@ def test_controller_pulses_outputs_for_gesture_results(tmp_path: Path) -> None:
         controller.ui_log[-1].message
         == "Fizzle (osc: OSCGrimoireFizzle): gesture too short"
     )
+
+
+def test_controller_saves_and_clears_stance_sample(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.persist_draft()
+    sample = _stance_sample()
+
+    controller.arm_stance_recording(spell.id)
+    updated = controller.handle_stance_sample(sample)
+    fresh = load_spellbook(tmp_path).spells[-1]
+    stance_path = tmp_path / fresh.stance_samples[0]
+
+    assert updated.has_stance
+    assert len(fresh.stance_samples) == 1
+    assert load_stance_sample(stance_path) == sample
+
+    cleared = controller.clear_stance_sample(spell.id)
+
+    assert not cleared.has_stance
+    assert not stance_path.exists()
+    assert controller.ui_log[-1].message == f"Cleared stance: {spell.name}"
+
+
+def test_controller_stance_gate_accepts_and_pulses_spell(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    controller = _controller(
+        tmp_path,
+        stance_config=StanceRecognitionConfig(
+            start_hold_s=0.1,
+            end_hold_s=0.1,
+            active_timeout_s=1.0,
+        ),
+    )
+    controller.output = output
+    spell = controller.persist_draft()
+    controller.save_stance_sample(spell.id, _stance_sample())
+
+    controller.update_stance_tracking(now=0.0, left=_pose(0.0), right=_pose(0.2))
+    controller.update_stance_tracking(now=0.1, left=_pose(0.0), right=_pose(0.2))
+    holding = controller.update_stance_tracking(
+        now=0.2, left=_pose(0.4), right=_pose(0.6)
+    )
+    result = controller.update_stance_tracking(
+        now=0.31, left=_pose(0.4), right=_pose(0.6)
+    )
+
+    assert holding.result is None
+    assert result.result is not None
+    assert result.result.decision.accepted
+    assert output.stance_casting == [True, False]
+    assert output.stance_start_count == 1
+    assert output.spell_pulses == [spell.name]
+    assert controller.last_match_kind == "stance"
+
+
+def test_controller_stance_gate_times_out_to_fizzle(tmp_path: Path) -> None:
+    output = _FakeOutput()
+    controller = _controller(
+        tmp_path,
+        stance_config=StanceRecognitionConfig(start_hold_s=0.1, active_timeout_s=0.2),
+    )
+    controller.output = output
+    spell = controller.persist_draft()
+    controller.save_stance_sample(spell.id, _stance_sample())
+
+    controller.update_stance_tracking(now=0.0, left=_pose(0.0), right=_pose(0.2))
+    controller.update_stance_tracking(now=0.1, left=_pose(0.0), right=_pose(0.2))
+    result = controller.update_stance_tracking(
+        now=0.31, left=_pose(0.1), right=_pose(0.3)
+    )
+
+    assert result.result is not None
+    assert not result.result.decision.accepted
+    assert output.fizzle_count == 1
+    assert controller.ui_log[-1].message.endswith("stance timed out")
+
+
+def test_controller_toggles_looping_stance_preview_state(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+    spell = controller.persist_draft()
+    sample = _stance_sample()
+    controller.save_stance_sample(spell.id, sample)
+
+    before_revision, before_sample = controller.stance_preview_state()
+    enabled_sample = controller.set_stance_preview_enabled(spell.id, True)
+    enabled_revision, active_sample = controller.stance_preview_state()
+
+    assert before_sample is None
+    assert enabled_sample == sample
+    assert active_sample == sample
+    assert enabled_revision == before_revision + 1
+    assert controller.stance_preview_enabled(spell.id)
+
+    controller.set_stance_preview_enabled(spell.id, False)
+    disabled_revision, disabled_sample = controller.stance_preview_state()
+
+    assert disabled_sample is None
+    assert disabled_revision == enabled_revision + 1
+    assert not controller.stance_preview_enabled(spell.id)
+
+
+def test_desktop_ui_stops_stance_preview_when_spell_page_is_hidden(
+    tmp_path: Path,
+) -> None:
+    from osc_grimoire.desktop_ui import PAGE_MAIN, DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.spellbook.spells[0]
+    controller.save_stance_sample(spell.id, _stance_sample())
+    controller.set_stance_preview_enabled(spell.id, True)
+    passive_ui = DesktopVoiceUi(controller)
+    passive_ui.page = PAGE_MAIN
+    passive_ui._stop_stance_preview_when_page_hidden()
+
+    assert controller.stance_preview_enabled(spell.id)
+
+    ui = DesktopVoiceUi(controller)
+    ui._open_spell_page(spell)
+    ui.local_stance_preview_spell_id = spell.id
+
+    ui._stop_stance_preview_when_page_hidden()
+
+    assert controller.stance_preview_enabled(spell.id)
+
+    ui.page = PAGE_MAIN
+    ui._stop_stance_preview_when_page_hidden()
+
+    assert not controller.stance_preview_enabled(spell.id)
 
 
 def test_load_audio_for_playback_reads_float32_sample(tmp_path: Path) -> None:
@@ -536,10 +671,12 @@ def test_desktop_ui_button_release_does_not_end_overlay_recording(
 def _controller(
     data_dir: Path,
     gesture_config: GestureRecognitionConfig | None = None,
+    stance_config: StanceRecognitionConfig | None = None,
 ) -> GrimoireController:
     config = AppConfig(
         audio=AudioConfig(sample_rate=16000),
         gesture=gesture_config or GestureRecognitionConfig(),
+        stance=stance_config or StanceRecognitionConfig(),
     )
     return GrimoireController(
         data_dir,
@@ -608,12 +745,15 @@ class _FakeOutput:
     def __init__(self) -> None:
         self.voice_recording: list[bool] = []
         self.gesture_drawing: list[bool] = []
+        self.stance_casting: list[bool] = []
         self.ui_enabled: list[bool] = []
         self.voice_enabled: list[bool] = []
         self.gesture_enabled: list[bool] = []
-        self.enable_toggles: list[tuple[bool, bool, bool]] = []
+        self.stance_enabled: list[bool] = []
+        self.enable_toggles: list[tuple[bool, bool, bool, bool]] = []
         self.spell_pulses: list[str] = []
         self.fizzle_count = 0
+        self.stance_start_count = 0
         self.tick_count = 0
 
     def set_voice_recording(self, recording: bool) -> None:
@@ -621,6 +761,12 @@ class _FakeOutput:
 
     def set_gesture_drawing(self, drawing: bool) -> None:
         self.gesture_drawing.append(drawing)
+
+    def set_stance_casting(self, casting: bool) -> None:
+        self.stance_casting.append(casting)
+
+    def pulse_stance_start(self) -> None:
+        self.stance_start_count += 1
 
     def set_ui_enabled(self, enabled: bool) -> None:
         self.ui_enabled.append(enabled)
@@ -631,10 +777,20 @@ class _FakeOutput:
     def set_gesture_enabled(self, enabled: bool) -> None:
         self.gesture_enabled.append(enabled)
 
+    def set_stance_enabled(self, enabled: bool) -> None:
+        self.stance_enabled.append(enabled)
+
     def set_enable_toggles(
-        self, *, ui_enabled: bool, gesture_enabled: bool, voice_enabled: bool
+        self,
+        *,
+        ui_enabled: bool,
+        gesture_enabled: bool,
+        voice_enabled: bool,
+        stance_enabled: bool,
     ) -> None:
-        self.enable_toggles.append((ui_enabled, gesture_enabled, voice_enabled))
+        self.enable_toggles.append(
+            (ui_enabled, gesture_enabled, voice_enabled, stance_enabled)
+        )
 
     def pulse_spell(self, spell) -> None:
         self.spell_pulses.append(spell.name)
@@ -653,6 +809,7 @@ class _FakeInput:
         self.ui_enabled = True
         self.gesture_enabled = True
         self.voice_enabled = True
+        self.stance_enabled = True
 
     def recent_messages(self) -> tuple[Any, ...]:
         return ()
@@ -663,6 +820,7 @@ class _FakeInput:
         ui_enabled: bool | None = None,
         gesture_enabled: bool | None = None,
         voice_enabled: bool | None = None,
+        stance_enabled: bool | None = None,
     ) -> None:
         if ui_enabled is not None:
             self.ui_enabled = ui_enabled
@@ -670,6 +828,8 @@ class _FakeInput:
             self.gesture_enabled = gesture_enabled
         if voice_enabled is not None:
             self.voice_enabled = voice_enabled
+        if stance_enabled is not None:
+            self.stance_enabled = stance_enabled
 
     def stop(self) -> None:
         pass
@@ -704,3 +864,16 @@ def _gesture_zigzag() -> FloatArray:
     x = np.linspace(0.0, 1.0, 12, dtype=np.float32)
     y = np.where(np.arange(12) % 2 == 0, 0.0, 0.4).astype(np.float32)
     return np.column_stack([x, y]).astype(np.float32)
+
+
+def _stance_sample() -> StanceSample:
+    return StanceSample(
+        frames=(
+            StanceFrame(0.0, _pose(0.0), _pose(0.2)),
+            StanceFrame(0.5, _pose(0.4), _pose(0.6)),
+        )
+    )
+
+
+def _pose(x: float) -> Pose:
+    return Pose((x, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
