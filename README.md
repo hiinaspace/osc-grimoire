@@ -1,6 +1,6 @@
 # OSC Grimoire
 
-Send OSC parameters to your avatar in vrchat with your voice, a wand gesture, or a two-hand stance. Tuned for spellcasting. Even nonsense words other speech recognition systems won't recognize should work.
+Send OSC parameters to your avatar in vrchat with your voice or a wand gesture. Even nonsense words other speech recognition systems won't recognize should work.
 
 [osc-grimoire no training 2026-05-04 22-17-02-[00.01.766-00.42.533]-audio.webm](https://github.com/user-attachments/assets/6b64d224-12e3-4803-9ea3-f6133e3ad438)
 
@@ -70,7 +70,9 @@ on the page.
 You can replace the gesture at any time by pressing `Record Gesture`
 again. Use `Clear Gesture` if you want to remove gesture casting from the spell.
 
-### 5. Train a two-hand stance
+### 5. Train a two-hand stance (ALPHA)
+
+*"Stances" are a start and end pose for your hands that you have to match, based off of Rumble's earthbending. They sort of work but are tricky, thus ALPHA for now*
 
 On the spell page, click `Record Stance`. In VR, put both controllers in the
 start pose you want, then press both triggers once. Move one or both hands to the
