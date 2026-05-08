@@ -107,23 +107,20 @@ OSCGrimoireSpell<SpellName>
 For example, `Alohomora` becomes `OSCGrimoireSpellAlohomora`. The desktop UI has
 `Copy` buttons beside OSC names so you can paste them into Unity.
 
-Custom signals use comma-separated `parameter=value` actions:
-
-- `On cast`: sent immediately when the spell is accepted.
-- `After duration`: sent after the configured pulse length.
+Custom signals use one comma-separated sequence. Sends use `parameter=value`;
+pauses use `(Pause 200ms)` or `(Pause 1.5s)`. Sends before the first pause go
+out immediately, and later sends run after the cumulative pause time.
 
 For example, the default bool pulse is equivalent to:
 
 ```text
-On cast: OSCGrimoireSpellAlohomora=true
-After duration: OSCGrimoireSpellAlohomora=false
+OSCGrimoireSpellAlohomora=true, (Pause 150ms), OSCGrimoireSpellAlohomora=false
 ```
 
 For an avatar that uses a stable shared int and a separate preparation bool:
 
 ```text
-On cast: Spell=1, MagicPrepared=true
-After duration:
+Spell=1, MagicPrepared=true, (Pause 500ms), MagicPrepared=false
 ```
 
 ![spell with custom osc](docs/customosc.png)

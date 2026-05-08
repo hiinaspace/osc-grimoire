@@ -16,7 +16,12 @@ from osc_grimoire.config import (
 )
 from osc_grimoire.desktop_controller import GrimoireController
 from osc_grimoire.gesture_recognizer import load_gesture_points
-from osc_grimoire.spellbook import PRESET_SPELL_NAMES, OscAction, load_spellbook
+from osc_grimoire.spellbook import (
+    PRESET_SPELL_NAMES,
+    OscAction,
+    OscPause,
+    load_spellbook,
+)
 from osc_grimoire.stance_capture import StanceFrame, StanceSample, load_stance_sample
 from osc_grimoire.stance_geometry import Pose
 from osc_grimoire.voice_features import FloatArray
@@ -83,39 +88,50 @@ def test_controller_rejects_invalid_voice_alias(tmp_path: Path) -> None:
         controller.add_voice_alias(spell.id, "")
 
 
-def test_controller_updates_spell_osc_parameter(tmp_path: Path) -> None:
+def test_controller_clears_spell_osc_sequence_to_default(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     spell = controller.persist_draft()
 
-    updated = controller.update_spell_osc_address(spell.id, "CustomFire")
+    updated = controller.update_spell_osc_sequence(
+        spell.id,
+        (
+            OscAction("CustomFire", True),
+            OscPause(0.15),
+            OscAction("CustomFire", False),
+        ),
+    )
 
-    assert updated.osc_address == "CustomFire"
-    assert controller.spell_osc_parameter_name(updated) == "CustomFire"
-    assert load_spellbook(tmp_path).spells[-1].osc_address == "CustomFire"
+    assert updated.osc_sequence == (
+        OscAction("CustomFire", True),
+        OscPause(0.15),
+        OscAction("CustomFire", False),
+    )
+    assert controller.spell_osc_signal_summary(updated) == (
+        "CustomFire=true, (Pause 150ms), CustomFire=false"
+    )
+    assert load_spellbook(tmp_path).spells[-1].osc_sequence == updated.osc_sequence
 
-    reset = controller.update_spell_osc_address(spell.id, "")
+    reset = controller.update_spell_osc_sequence(spell.id, None)
 
-    assert reset.osc_address is None
+    assert reset.osc_sequence is None
     assert controller.spell_osc_parameter_name(reset).startswith("OSCGrimoireSpell")
 
 
-def test_controller_updates_spell_osc_actions(tmp_path: Path) -> None:
+def test_controller_updates_spell_osc_sequence(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     spell = controller.persist_draft()
 
-    updated = controller.update_spell_osc_actions(
+    updated = controller.update_spell_osc_sequence(
         spell.id,
-        on_cast=(OscAction("Spell", 3), OscAction("MagicPrepared", True)),
-        after_cast=(),
+        (OscAction("Spell", 3), OscAction("MagicPrepared", True)),
     )
 
-    assert updated.osc_on_cast == (
+    assert updated.osc_sequence == (
         OscAction("Spell", 3),
         OscAction("MagicPrepared", True),
     )
-    assert updated.osc_after_cast == ()
     assert controller.spell_osc_signal_summary(updated) == "Spell=3, MagicPrepared=true"
-    assert load_spellbook(tmp_path).spells[-1].osc_on_cast == updated.osc_on_cast
+    assert load_spellbook(tmp_path).spells[-1].osc_sequence == updated.osc_sequence
 
 
 def test_controller_recognizes_with_fake_backend(tmp_path: Path) -> None:
@@ -143,7 +159,8 @@ def test_controller_pulses_spell_on_accepted_voice(tmp_path: Path) -> None:
     assert output.fizzle_count == 0
     assert (
         controller.ui_log[-1].message
-        == "Accepted: Alohomora (osc: OSCGrimoireSpellAlohomora=true -> OSCGrimoireSpellAlohomora=false)"
+        == "Accepted: Alohomora (osc: OSCGrimoireSpellAlohomora=true, "
+        "(Pause 150ms), OSCGrimoireSpellAlohomora=false)"
     )
 
 
@@ -582,15 +599,13 @@ def test_desktop_ui_osc_edit_updates_spell_parameter(tmp_path: Path) -> None:
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.osc_editing = True
     ui.osc_edit_spell_id = spell.id
-    ui.osc_on_cast_edit = "CustomFire=true"
-    ui.osc_after_cast_edit = "CustomFire=false"
+    ui.osc_sequence_edit = "CustomFire=true, (Pause 150ms), CustomFire=false"
 
     ui._finish_osc_edit(commit=True)
 
-    assert controller.spellbook.spells[0].osc_on_cast == (
+    assert controller.spellbook.spells[0].osc_sequence == (
         OscAction("CustomFire", True),
-    )
-    assert controller.spellbook.spells[0].osc_after_cast == (
+        OscPause(0.15),
         OscAction("CustomFire", False),
     )
 
@@ -603,17 +618,32 @@ def test_desktop_ui_osc_edit_updates_custom_spell_actions(tmp_path: Path) -> Non
     ui = DesktopVoiceUi(controller, overlay_mode=True)
     ui.osc_editing = True
     ui.osc_edit_spell_id = spell.id
-    ui.osc_on_cast_edit = "Spell=4, MagicPrepared=true"
-    ui.osc_after_cast_edit = ""
+    ui.osc_sequence_edit = "Spell=4, MagicPrepared=true"
 
     ui._finish_osc_edit(commit=True)
 
     updated = controller.spellbook.spells[0]
-    assert updated.osc_on_cast == (
+    assert updated.osc_sequence == (
         OscAction("Spell", 4),
         OscAction("MagicPrepared", True),
     )
-    assert updated.osc_after_cast == ()
+
+
+def test_desktop_ui_osc_edit_invalid_sequence_stays_open(tmp_path: Path) -> None:
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    spell = controller.spellbook.spells[0]
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    ui.osc_editing = True
+    ui.osc_edit_spell_id = spell.id
+    ui.osc_sequence_edit = "Spell=banana"
+
+    ui._finish_osc_edit(commit=True)
+
+    assert ui.osc_editing
+    assert controller.spellbook.spells[0].osc_sequence is None
+    assert "OSC value" in controller.status
 
 
 def test_desktop_ui_spoken_name_requires_confirmation(

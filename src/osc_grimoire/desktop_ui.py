@@ -19,9 +19,9 @@ from .desktop_controller import (
 )
 from .gesture_recognizer import GestureRanking
 from .osc_input import OscInputService
-from .osc_output import OscOutput, spell_osc_actions
+from .osc_output import OscOutput
 from .paths import default_data_dir
-from .spellbook import Spell, format_osc_actions, parse_osc_actions
+from .spellbook import Spell, format_osc_sequence, parse_osc_sequence
 from .stance_capture import StanceSample, looping_stance_frame
 from .stance_gate import StanceRanking
 from .stance_geometry import Pose, matrix_from_quaternion
@@ -67,8 +67,7 @@ class DesktopVoiceUi:
         self.keyboard_original_name = ""
         self.osc_edit_spell_id: str | None = None
         self.osc_editing = False
-        self.osc_on_cast_edit = ""
-        self.osc_after_cast_edit = ""
+        self.osc_sequence_edit = ""
         self.osc_focus_pending = False
         self.pending_spoken_name: str | None = None
         self.pending_spoken_name_spell_id: str | None = None
@@ -572,14 +571,14 @@ class DesktopVoiceUi:
                 imgui.set_keyboard_focus_here()
                 self.osc_focus_pending = False
             imgui.text_disabled(
-                "Use comma-separated actions like Spell=1, MagicPrepared=true."
+                "Use comma-separated steps like Spell=1, (Pause 200ms), MagicPrepared=false."
             )
-            _changed, value = imgui.input_text("On cast", self.osc_on_cast_edit)
-            self.osc_on_cast_edit = value
-            _changed, value = imgui.input_text(
-                "After duration", self.osc_after_cast_edit
+            _changed, value = imgui.input_text_multiline(
+                "OSC sequence",
+                self.osc_sequence_edit,
+                imgui.ImVec2(-1.0, 72.0),
             )
-            self.osc_after_cast_edit = value
+            self.osc_sequence_edit = value
             if imgui.button("Save OSC"):
                 self._finish_osc_edit(commit=True)
             imgui.same_line()
@@ -590,32 +589,21 @@ class DesktopVoiceUi:
                 self._request_osc_keyboard(spell)
             imgui.same_line()
             if imgui.button("Use Default"):
-                self.osc_on_cast_edit = ""
-                self.osc_after_cast_edit = ""
+                self.osc_sequence_edit = ""
                 self._finish_osc_edit(commit=True)
             imgui.text_disabled(
-                "Default is SpellName=true on cast, then SpellName=false after duration."
+                "Default is SpellName=true, (Pause 150ms), SpellName=false."
             )
-            imgui.text_disabled("Leave after duration blank for no ending actions.")
+            imgui.text_disabled("Leave blank to use the default spell pulse.")
             return
         if imgui.button("Edit OSC"):
             self.osc_edit_spell_id = spell.id
             self.osc_editing = True
-            if spell.osc_on_cast is None and spell.osc_after_cast is None:
-                if spell.osc_address:
-                    on_cast, after_cast = spell_osc_actions(
-                        spell, self.controller.config.osc
-                    )
-                    self.osc_on_cast_edit = format_osc_actions(on_cast)
-                    self.osc_after_cast_edit = format_osc_actions(after_cast)
-                else:
-                    self.osc_on_cast_edit = ""
-                    self.osc_after_cast_edit = ""
-            else:
-                self.osc_on_cast_edit = format_osc_actions(spell.osc_on_cast or ())
-                self.osc_after_cast_edit = format_osc_actions(
-                    spell.osc_after_cast or ()
-                )
+            self.osc_sequence_edit = (
+                ""
+                if spell.osc_sequence is None
+                else format_osc_sequence(spell.osc_sequence)
+            )
             self.osc_focus_pending = True
 
     def _request_osc_keyboard(self, spell: Spell) -> None:
@@ -623,7 +611,7 @@ class DesktopVoiceUi:
             self.controller.status = "SteamVR keyboard is unavailable."
             return
         if self.keyboard_request_handler(
-            spell.id, self.osc_on_cast_edit, "OSC on cast"
+            spell.id, self.osc_sequence_edit, "OSC sequence"
         ):
             self.osc_focus_pending = True
             self.controller.status = "SteamVR keyboard opened."
@@ -634,18 +622,13 @@ class DesktopVoiceUi:
         spell_id = self.osc_edit_spell_id
         if commit:
             try:
-                if self.osc_on_cast_edit.strip() or self.osc_after_cast_edit.strip():
-                    on_cast = parse_osc_actions(self.osc_on_cast_edit)
-                    after_cast = parse_osc_actions(self.osc_after_cast_edit)
-                else:
-                    on_cast = None
-                    after_cast = None
+                sequence = (
+                    parse_osc_sequence(self.osc_sequence_edit)
+                    if self.osc_sequence_edit.strip()
+                    else None
+                )
                 if spell_id is not None:
-                    spell = self.controller.update_spell_osc_actions(
-                        spell_id,
-                        on_cast=on_cast,
-                        after_cast=after_cast,
-                    )
+                    spell = self.controller.update_spell_osc_sequence(spell_id, sequence)
                     self.selected_spell_id = spell.id
             except ValueError as exc:
                 self.controller.status = str(exc)
@@ -658,8 +641,7 @@ class DesktopVoiceUi:
         if spell_id is None:
             return
         if not commit:
-            self.osc_on_cast_edit = ""
-            self.osc_after_cast_edit = ""
+            self.osc_sequence_edit = ""
             self.controller.status = "OSC parameter edit cancelled."
             return
 

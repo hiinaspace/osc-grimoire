@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -11,16 +12,33 @@ from .paths import spell_samples_dir, spellbook_path
 
 LOGGER = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = {2, SCHEMA_VERSION}
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = {2, 3, SCHEMA_VERSION}
 PRESET_SPELL_NAMES = ("Alohomora", "Spongify", "Rictusempra", "Flipendo")
 OscValue = bool | int | float
+LEGACY_OSC_AFTER_DELAY_S = 0.15
+_PAUSE_PATTERN = re.compile(
+    r"^\(\s*pause\s+([+-]?[0-9]+(?:\.[0-9]+)?)\s*(ms|s)\s*\)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
 class OscAction:
     parameter: str
     value: OscValue
+
+
+@dataclass(frozen=True)
+class OscPause:
+    duration_s: float
+
+    def __post_init__(self) -> None:
+        if self.duration_s <= 0.0:
+            raise ValueError("OSC pause duration must be positive")
+
+
+OscStep = OscAction | OscPause
 
 
 @dataclass(frozen=True)
@@ -34,9 +52,7 @@ class Spell:
     voice_aliases: tuple[str, ...] = ()
     gesture_samples: tuple[str, ...] = ()
     stance_samples: tuple[str, ...] = ()
-    osc_address: str | None = None
-    osc_on_cast: tuple[OscAction, ...] | None = None
-    osc_after_cast: tuple[OscAction, ...] | None = None
+    osc_sequence: tuple[OscStep, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -253,26 +269,40 @@ def normalize_voice_alias(alias: str) -> str:
     return cleaned
 
 
-def parse_osc_actions(text: str) -> tuple[OscAction, ...]:
-    actions: list[OscAction] = []
+def parse_osc_sequence(text: str) -> tuple[OscStep, ...]:
+    steps: list[OscStep] = []
     for raw_part in text.replace("\n", ",").split(","):
         part = raw_part.strip()
         if not part:
             continue
+        pause = _parse_osc_pause(part)
+        if pause is not None:
+            steps.append(pause)
+            continue
+        if part.startswith("(") or part.endswith(")"):
+            raise ValueError("OSC pause step must use (Pause 200ms) or (Pause 1.5s)")
         if "=" not in part:
-            raise ValueError(f"OSC action {part!r} must be parameter=value")
+            raise ValueError(
+                f"OSC step {part!r} must be parameter=value or (Pause 200ms)"
+            )
         parameter, raw_value = part.split("=", 1)
-        actions.append(
+        steps.append(
             OscAction(
                 parameter=normalize_osc_parameter(parameter),
                 value=parse_osc_value(raw_value),
             )
         )
-    return tuple(actions)
+    return tuple(steps)
 
 
-def format_osc_actions(actions: tuple[OscAction, ...]) -> str:
-    return ", ".join(format_osc_action(action) for action in actions)
+def format_osc_sequence(steps: tuple[OscStep, ...]) -> str:
+    return ", ".join(format_osc_step(step) for step in steps)
+
+
+def format_osc_step(step: OscStep) -> str:
+    if isinstance(step, OscPause):
+        return format_osc_pause(step)
+    return format_osc_action(step)
 
 
 def format_osc_action(action: OscAction) -> str:
@@ -282,6 +312,28 @@ def format_osc_action(action: OscAction) -> str:
     else:
         text = str(value)
     return f"{action.parameter}={text}"
+
+
+def format_osc_pause(pause: OscPause) -> str:
+    milliseconds = pause.duration_s * 1000.0
+    rounded_ms = round(milliseconds)
+    if abs(milliseconds - rounded_ms) < 1e-6 and rounded_ms < 1000:
+        return f"(Pause {rounded_ms}ms)"
+    if pause.duration_s >= 1.0:
+        return f"(Pause {pause.duration_s:g}s)"
+    return f"(Pause {milliseconds:g}ms)"
+
+
+def _parse_osc_pause(text: str) -> OscPause | None:
+    match = _PAUSE_PATTERN.match(text)
+    if match is None:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).casefold()
+    duration_s = value / 1000.0 if unit == "ms" else value
+    if duration_s <= 0.0:
+        raise ValueError("OSC pause duration must be positive")
+    return OscPause(duration_s)
 
 
 def parse_osc_value(text: str) -> OscValue:
@@ -320,6 +372,40 @@ def _spell_from_json(entry: dict) -> Spell:
         for alias in recognition.get("voice_aliases", ())
         if str(alias).strip()
     )
+    sequence = _osc_sequence_from_json(osc)
+    if sequence is None:
+        sequence = _legacy_osc_sequence_from_json(osc, entry)
+    return Spell(
+        id=entry["id"],
+        name=entry["name"],
+        enabled=entry.get("enabled", True),
+        has_gesture=bool(modalities.get("gesture", False)),
+        has_stance=bool(modalities.get("stance", False)),
+        has_voice=bool(modalities.get("voice", True)),
+        voice_aliases=aliases,
+        gesture_samples=tuple(samples.get("gestures", ())),
+        stance_samples=tuple(samples.get("stances", ())),
+        osc_sequence=sequence,
+    )
+
+
+def _osc_sequence_from_json(osc: dict) -> tuple[OscStep, ...] | None:
+    if "sequence" not in osc:
+        return None
+    return tuple(_osc_step_from_json(entry) for entry in osc.get("sequence", ()))
+
+
+def _osc_step_from_json(entry: dict) -> OscStep:
+    step_type = str(entry.get("type") or "")
+    if step_type == "send":
+        return _osc_action_from_json(entry)
+    if step_type == "pause":
+        duration_ms = float(entry["duration_ms"])
+        return OscPause(duration_ms / 1000.0)
+    raise ValueError(f"Unsupported OSC sequence step type {step_type!r}")
+
+
+def _legacy_osc_sequence_from_json(osc: dict, entry: dict) -> tuple[OscStep, ...] | None:
     on_cast = _osc_actions_from_json(osc, "on_cast")
     after_cast = _osc_actions_from_json(osc, "after_cast")
     if on_cast is None and after_cast is None and osc.get("mode") == "int":
@@ -336,20 +422,17 @@ def _spell_from_json(entry: dict) -> Spell:
                 value=int(osc.get("int_reset_value", 0)),
             ),
         )
-    return Spell(
-        id=entry["id"],
-        name=entry["name"],
-        enabled=entry.get("enabled", True),
-        has_gesture=bool(modalities.get("gesture", False)),
-        has_stance=bool(modalities.get("stance", False)),
-        has_voice=bool(modalities.get("voice", True)),
-        voice_aliases=aliases,
-        gesture_samples=tuple(samples.get("gestures", ())),
-        stance_samples=tuple(samples.get("stances", ())),
-        osc_address=osc.get("address"),
-        osc_on_cast=on_cast,
-        osc_after_cast=after_cast,
-    )
+    elif on_cast is None and after_cast is None and osc.get("address"):
+        parameter = normalize_osc_parameter(str(osc["address"]))
+        on_cast = (OscAction(parameter, True),)
+        after_cast = (OscAction(parameter, False),)
+    if on_cast is None and after_cast is None:
+        return None
+    sequence: list[OscStep] = [*(on_cast or ())]
+    if after_cast:
+        sequence.append(OscPause(LEGACY_OSC_AFTER_DELAY_S))
+        sequence.extend(after_cast)
+    return tuple(sequence)
 
 
 def _osc_actions_from_json(osc: dict, key: str) -> tuple[OscAction, ...] | None:
@@ -394,13 +477,22 @@ def _spell_to_json(spell: Spell) -> dict:
 
 def _osc_to_json(spell: Spell) -> dict | None:
     payload: dict[str, object] = {}
-    if spell.osc_address:
-        payload["address"] = spell.osc_address
-    if spell.osc_on_cast is not None:
-        payload["on_cast"] = [_osc_action_to_json(a) for a in spell.osc_on_cast]
-    if spell.osc_after_cast is not None:
-        payload["after_cast"] = [_osc_action_to_json(a) for a in spell.osc_after_cast]
+    if spell.osc_sequence is not None:
+        payload["sequence"] = [_osc_step_to_json(step) for step in spell.osc_sequence]
     return payload or None
+
+
+def _osc_step_to_json(step: OscStep) -> dict[str, object]:
+    if isinstance(step, OscPause):
+        duration_ms = step.duration_s * 1000.0
+        rounded_ms = round(duration_ms)
+        return {
+            "type": "pause",
+            "duration_ms": rounded_ms
+            if abs(duration_ms - rounded_ms) < 1e-6
+            else duration_ms,
+        }
+    return {"type": "send", **_osc_action_to_json(step)}
 
 
 def _osc_action_to_json(action: OscAction) -> dict[str, object]:

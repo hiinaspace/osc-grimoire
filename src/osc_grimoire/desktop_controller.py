@@ -25,7 +25,7 @@ from .osc_output import (
 )
 from .paths import spell_samples_dir
 from .spellbook import (
-    OscAction,
+    OscStep,
     Spell,
     add_voice_alias,
     create_spell,
@@ -460,28 +460,13 @@ class GrimoireController:
         self.status = f"Removed incantation from {fresh.name}."
         return fresh
 
-    def update_spell_osc_address(self, spell_id: str, value: str) -> Spell:
-        return self.update_spell_osc_actions(
-            spell_id,
-            on_cast=None,
-            after_cast=None,
-            address=value,
-        )
-
-    def update_spell_osc_actions(
-        self,
-        spell_id: str,
-        *,
-        on_cast: tuple[OscAction, ...] | None,
-        after_cast: tuple[OscAction, ...] | None,
-        address: str | None = None,
+    def update_spell_osc_sequence(
+        self, spell_id: str, sequence: tuple[OscStep, ...] | None
     ) -> Spell:
         spell = self._spell_or_raise(spell_id)
         updated = replace(
             spell,
-            osc_address=(address or "").strip() or None,
-            osc_on_cast=on_cast,
-            osc_after_cast=after_cast,
+            osc_sequence=sequence,
         )
         self.spellbook = replace_spell(self.spellbook, updated)
         save_spellbook(self.spellbook)
