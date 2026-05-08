@@ -409,6 +409,7 @@ class OpenVrOverlayRunner:
         self.stance_preview_reference_yaw: tuple[float, float, float, float] | None = None
         self.stance_preview_started_at = 0.0
         self.overlay_visible = True
+        self.gesture_trail_visible = False
         self.keyboard_request: SteamVrKeyboardRequest | None = None
         self.keyboard_user_value = 2001
         self._shutdown_openvr = False
@@ -806,7 +807,7 @@ class OpenVrOverlayRunner:
             self._apply_mouse_events(hovering=False, trigger_down=False, position=None)
             self.trigger_down = input_state.trigger_down
             return
-        if self.app.controller.gesture_enabled:
+        if self._gesture_capture_allowed():
             self._update_gesture_capture(input_state.grip_down, poses, input_state.pose)
         else:
             self._cancel_gesture_capture()
@@ -847,7 +848,7 @@ class OpenVrOverlayRunner:
     def _update_gesture_capture(
         self, grip_down: bool, poses: Any, pointer_pose: Any
     ) -> None:
-        if not self.app.controller.gesture_enabled:
+        if not self._gesture_capture_allowed():
             self._cancel_gesture_capture()
             self.grip_down = grip_down
             return
@@ -882,6 +883,12 @@ class OpenVrOverlayRunner:
                 LOGGER.exception("Gesture action failed")
                 self.app.controller.status = str(exc)
         self.grip_down = grip_down
+
+    def _gesture_capture_allowed(self) -> bool:
+        return (
+            self.app.controller.gesture_enabled
+            or self.app.controller.armed_gesture_spell_id is not None
+        )
 
     def _update_stance_recording(
         self, input_state: OpenVrInputState, poses: Any, now: float
@@ -1190,16 +1197,22 @@ class OpenVrOverlayRunner:
     def _show_gesture_trail(self) -> None:
         assert self.vr_overlay is not None
         assert self.trail_overlay_handle is not None
+        if not self.config.draw_gesture_trail_overlay:
+            return
         if not self._update_gesture_trail_transform():
             return
         self.vr_overlay.showOverlay(self.trail_overlay_handle)
+        self.gesture_trail_visible = True
 
     def _hide_gesture_trail(self) -> None:
         if self.vr_overlay is None or self.trail_overlay_handle is None:
             return
         if self.trail_texture is not None:
             self.trail_texture.clear()
+        if not self.gesture_trail_visible:
+            return
         self.vr_overlay.hideOverlay(self.trail_overlay_handle)
+        self.gesture_trail_visible = False
 
     def _show_stance_preview_overlays(self) -> None:
         if self.vr_overlay is None:
@@ -1275,6 +1288,9 @@ class OpenVrOverlayRunner:
             )
 
     def _update_gesture_trail(self) -> None:
+        if not self.config.draw_gesture_trail_overlay:
+            self._hide_gesture_trail()
+            return
         if self.trail_texture is None:
             return
         self._update_gesture_trail_transform()

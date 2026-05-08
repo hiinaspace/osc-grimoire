@@ -248,7 +248,14 @@ class GrimoireController:
         osc_enabled = (
             self.osc_input.gesture_enabled if self.osc_input is not None else True
         )
-        return self.local_gesture_enabled and osc_enabled
+        return self.local_gesture_enabled and osc_enabled and self.has_trained_gestures
+
+    @property
+    def has_trained_gestures(self) -> bool:
+        return any(
+            spell.has_gesture and spell.gesture_samples
+            for spell in self.spellbook.spells
+        )
 
     @property
     def voice_enabled(self) -> bool:
@@ -269,8 +276,11 @@ class GrimoireController:
         if self.osc_input is not None:
             self.osc_input.set_enabled_state(gesture_enabled=enabled)
         if self.output is not None:
-            self.output.set_gesture_enabled(enabled)
-        self.status = f"Gesture input {'enabled' if enabled else 'disabled'}."
+            self.output.set_gesture_enabled(self.gesture_enabled)
+        if enabled and not self.has_trained_gestures:
+            self.status = "Gesture input enabled, but no gestures are trained."
+        else:
+            self.status = f"Gesture input {'enabled' if enabled else 'disabled'}."
 
     def set_voice_enabled(self, enabled: bool) -> None:
         self.local_voice_enabled = enabled
@@ -314,6 +324,20 @@ class GrimoireController:
             ),
         )
         self.status = f"Casting hand set to {hand}."
+
+    def set_gesture_trail_overlay_enabled(self, enabled: bool) -> None:
+        self.config = replace(
+            self.config,
+            openvr=replace(
+                self.config.openvr,
+                draw_gesture_trail_overlay=bool(enabled),
+            ),
+        )
+        self.status = (
+            "Gesture trail overlay enabled."
+            if enabled
+            else "Gesture trail overlay disabled."
+        )
 
     def set_voice_strictness(self, value: float) -> None:
         value = min(max(float(value), 0.0), 1.0)
@@ -560,6 +584,7 @@ class GrimoireController:
         fresh = self._spell_or_raise(spell.id)
         self.latest_gesture_points = points
         self.last_gesture_result = None
+        self.sync_enable_toggles_to_output()
         self.status = f"Saved gesture for {fresh.name}."
         return fresh
 
@@ -599,6 +624,7 @@ class GrimoireController:
         fresh = self._spell_or_raise(spell.id)
         self.last_gesture_result = None
         self.latest_gesture_points = None
+        self.sync_enable_toggles_to_output()
         self.status = f"Cleared gesture for {fresh.name}."
         self.add_log(f"Cleared gesture: {fresh.name}")
         return fresh

@@ -211,6 +211,43 @@ def test_controller_local_input_toggles_combine_with_osc_input(tmp_path: Path) -
     assert output.ui_enabled == [False]
 
 
+def test_controller_treats_gesture_input_disabled_until_sample_exists(
+    tmp_path: Path,
+) -> None:
+    output = _FakeOutput()
+    controller = _controller(
+        tmp_path, gesture_config=GestureRecognitionConfig(min_points=3)
+    )
+    controller.output = output
+    spell = controller.persist_draft()
+
+    assert not controller.gesture_enabled
+
+    controller.set_gesture_enabled(True)
+
+    assert output.gesture_enabled == [False]
+    assert "no gestures are trained" in controller.status
+
+    controller.save_gesture_sample(spell.id, _gesture_line())
+
+    assert controller.gesture_enabled
+    assert output.enable_toggles[-1][1] is True
+
+    controller.clear_gesture_sample(spell.id)
+
+    assert not controller.gesture_enabled
+    assert output.enable_toggles[-1][1] is False
+
+
+def test_controller_updates_gesture_trail_overlay_setting(tmp_path: Path) -> None:
+    controller = _controller(tmp_path)
+
+    controller.set_gesture_trail_overlay_enabled(False)
+
+    assert not controller.config.openvr.draw_gesture_trail_overlay
+    assert controller.status == "Gesture trail overlay disabled."
+
+
 def test_controller_voice_strictness_updates_voice_thresholds(
     tmp_path: Path,
 ) -> None:
@@ -582,6 +619,40 @@ def test_desktop_ui_overlay_spellbook_checkbox_hides_overlay(
     assert checkbox_calls[0] == ("Spellbook", True)
     assert not controller.ui_enabled
     assert hidden_notifications == 1
+
+
+def test_desktop_ui_settings_toggle_updates_gesture_trail_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from imgui_bundle import imgui
+
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    ui = DesktopVoiceUi(controller)
+
+    def checkbox(label: str, value: bool) -> tuple[bool, bool]:
+        if label == "Draw Gesture Trail Overlay":
+            return True, False
+        return False, value
+
+    monkeypatch.setattr(imgui, "text", lambda _text: None)
+    monkeypatch.setattr(imgui, "separator", lambda: None)
+    monkeypatch.setattr(imgui, "text_disabled", lambda _text: None)
+    monkeypatch.setattr(imgui, "radio_button", lambda _label, _active: False)
+    monkeypatch.setattr(imgui, "same_line", lambda: None)
+    monkeypatch.setattr(imgui, "bullet_text", lambda _text: None)
+    monkeypatch.setattr(imgui, "text_wrapped", lambda _text: None)
+    monkeypatch.setattr(imgui, "button", lambda _label: False)
+    monkeypatch.setattr(imgui, "checkbox", checkbox)
+    monkeypatch.setattr(imgui, "collapsing_header", lambda _label: False)
+    monkeypatch.setattr(ui, "_draw_strictness_slider", lambda *_args: None)
+    monkeypatch.setattr(ui, "_draw_osc_help_parameter", lambda *_args: None)
+    monkeypatch.setattr(ui, "_draw_diagnostics_details", lambda: None)
+
+    ui._draw_settings_page()
+
+    assert not controller.config.openvr.draw_gesture_trail_overlay
 
 
 def test_desktop_ui_overlay_keyboard_finish_updates_spell(tmp_path: Path) -> None:

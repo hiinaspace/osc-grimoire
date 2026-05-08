@@ -958,6 +958,16 @@ class DesktopVoiceUi:
             self._request_binding_settings()
 
         imgui.separator()
+        imgui.text("Gesture")
+        trail_enabled = self.controller.config.openvr.draw_gesture_trail_overlay
+        changed, trail_enabled = imgui.checkbox(
+            "Draw Gesture Trail Overlay", trail_enabled
+        )
+        if changed:
+            self.controller.set_gesture_trail_overlay_enabled(trail_enabled)
+        imgui.text_disabled("Turn off when your avatar already draws a casting trail.")
+
+        imgui.separator()
         imgui.text("Recognition tuning")
         imgui.text_disabled(
             "Move left to accept more attempts; move right to reject uncertain matches."

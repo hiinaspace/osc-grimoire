@@ -75,6 +75,7 @@ def test_overlay_config_defaults_left_anchor_right_pointer_large_overlay() -> No
     assert config.overlay_hand == "left"
     assert config.pointer_hand == "right"
     assert config.overlay_width_m == 0.50
+    assert config.draw_gesture_trail_overlay
     assert config.gesture_trail_width_m == 1.0
 
 
@@ -251,6 +252,41 @@ def test_runner_routes_grip_stroke_to_controller() -> None:
     assert app.opened_gesture_results == [None]
     assert runner.vr_overlay.shown == [456]
     assert runner.vr_overlay.hidden == [456]
+
+
+def test_runner_can_record_gesture_without_drawing_trail() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(
+        cast(DesktopVoiceUi, app),
+        OpenVrOverlayConfig(draw_gesture_trail_overlay=False),
+    )
+    runner.openvr = _FakeOpenVr()
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    runner.vr_overlay = _FakeOverlay()
+    runner.trail_overlay_handle = 456
+
+    runner._update_gesture_capture(True, poses, poses[1])
+    runner._update_gesture_capture(False, poses, poses[1])
+
+    assert app.controller.gesture_count == 1
+    assert runner.vr_overlay.shown == []
+    assert runner.vr_overlay.hidden == []
+
+
+def test_runner_allows_armed_gesture_when_gesture_recognition_is_disabled() -> None:
+    app = _FakeApp()
+    app.controller.gesture_enabled = False
+    app.controller.armed_gesture_spell_id = "spell-1"
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    runner.vr_overlay = _FakeOverlay()
+    runner.trail_overlay_handle = 456
+
+    runner._update_gesture_capture(True, poses, poses[1])
+    runner._update_gesture_capture(False, poses, poses[1])
+
+    assert app.controller.gesture_count == 1
 
 
 def test_runner_opens_spell_page_after_gesture_creates_spell() -> None:
@@ -786,6 +822,7 @@ class _FakeController:
         self.stance_casting: list[bool] = []
         self.gesture_result = None
         self.stance_result = None
+        self.armed_gesture_spell_id = None
         self.armed_stance_spell_id = None
         self.ui_enabled = True
         self.gesture_enabled = True
