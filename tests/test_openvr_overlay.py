@@ -523,7 +523,7 @@ def test_runner_opens_steamvr_binding_ui() -> None:
     assert vr_input.binding_calls == [(APP_KEY, 10, 14, False)]
 
 
-def test_runner_ui_toggle_action_flips_controller_visibility(
+def test_runner_ui_toggle_action_hides_overlay_and_notifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _FakeApp()
@@ -546,6 +546,52 @@ def test_runner_ui_toggle_action_flips_controller_visibility(
     runner._inject_controller_input()
 
     assert app.controller.ui_toggle_count == 1
+    assert not app.controller.ui_enabled
+    assert runner.openvr.notifications.created == [
+        (
+            123,
+            "OSC Grimoire spellbook hidden, toggle it back on in the desktop window",
+        )
+    ]
+
+
+def test_runner_ui_toggle_action_showing_overlay_does_not_notify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _FakeApp()
+    app.controller.ui_enabled = False
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.vr_system = _FakeSystem()
+    runner.vr_overlay = _FakeOverlay()
+    runner.overlay_handle = 123
+    poses = [_FakePose(_matrix((0, 0, 0))) for _ in range(3)]
+    monkeypatch.setattr(
+        runner, "_input_state", lambda: OpenVrInputState(False, False, False, poses[1])
+    )
+    monkeypatch.setattr(runner, "_tracked_device_poses", lambda: poses)
+    monkeypatch.setattr(runner, "_compute_intersection", lambda _ray: None)
+    monkeypatch.setattr(runner, "_apply_mouse_events", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        runner, "_digital_action_pressed", lambda name: name == "ui_toggle"
+    )
+
+    runner._inject_controller_input()
+
+    assert app.controller.ui_enabled
+    assert runner.openvr.notifications.created == []
+
+
+def test_runner_spellbook_hidden_notification_failure_is_nonfatal() -> None:
+    app = _FakeApp()
+    runner = OpenVrOverlayRunner(cast(DesktopVoiceUi, app), OpenVrOverlayConfig())
+    runner.openvr = _FakeOpenVr()
+    runner.openvr.notifications = _FailingNotifications()
+    runner.overlay_handle = 123
+
+    runner._notify_spellbook_hidden_from_vr()
+
+    assert runner.openvr.notifications.created == []
 
 
 def test_runner_tolerates_openvr_input_no_data() -> None:
@@ -778,6 +824,7 @@ class _FakeController:
 
     def toggle_ui_enabled(self) -> None:
         self.ui_toggle_count += 1
+        self.ui_enabled = not self.ui_enabled
 
 
 class _FakeApp:
@@ -812,6 +859,9 @@ class _FakeKeyboardApp:
 
 
 class _FakeOpenVr:
+    def __init__(self) -> None:
+        self.notifications = _FakeNotifications()
+
     class _ActionSetArrayFactory:
         def __call__(self):
             return _FakeOpenVr._ActionSet()
@@ -849,9 +899,14 @@ class _FakeOpenVr:
     k_EGamepadTextInputLineModeSingleLine = 0
     KeyboardFlag_Minimal = 1
     KeyboardFlag_Modal = 2
+    EVRNotificationType_Transient = 0
+    EVRNotificationStyle_Application = 100
     VREvent_KeyboardCharInput = 100
     VREvent_KeyboardDone = 101
     VREvent_KeyboardClosed = 102
+
+    class NotificationBitmap_t:
+        pass
 
     class VREvent_t:
         def __init__(self) -> None:
@@ -872,6 +927,39 @@ class _FakeOpenVr:
                 [0.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0, 0.0],
             ]
+
+    def VRNotifications(self):
+        return self.notifications
+
+
+class _FakeNotifications:
+    def __init__(self) -> None:
+        self.created: list[tuple[int, str]] = []
+
+    def createNotification(
+        self,
+        overlay_handle,
+        _user_value,
+        _type,
+        text,
+        _style,
+        _image,
+    ):
+        self.created.append((overlay_handle, text))
+        return 1
+
+
+class _FailingNotifications(_FakeNotifications):
+    def createNotification(
+        self,
+        overlay_handle,
+        _user_value,
+        _type,
+        text,
+        _style,
+        _image,
+    ):
+        raise RuntimeError("notification unavailable")
 
 
 class _FakeSystem:

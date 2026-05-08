@@ -550,6 +550,40 @@ def test_desktop_ui_overlay_mode_disables_spell_name_editing(tmp_path: Path) -> 
     assert not ui._can_edit_spell_names()
 
 
+def test_desktop_ui_overlay_spellbook_checkbox_hides_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from imgui_bundle import imgui
+
+    from osc_grimoire.desktop_ui import DesktopVoiceUi
+
+    controller = _controller(tmp_path)
+    ui = DesktopVoiceUi(controller, overlay_mode=True)
+    hidden_notifications = 0
+    checkbox_calls: list[tuple[str, bool]] = []
+
+    def checkbox(label: str, value: bool) -> tuple[bool, bool]:
+        checkbox_calls.append((label, value))
+        if label == "Spellbook":
+            return True, False
+        return False, value
+
+    def notify_hidden() -> None:
+        nonlocal hidden_notifications
+        hidden_notifications += 1
+
+    monkeypatch.setattr(imgui, "checkbox", checkbox)
+    monkeypatch.setattr(imgui, "same_line", lambda: None)
+    monkeypatch.setattr(imgui, "text_disabled", lambda _text: None)
+    ui.overlay_spellbook_hidden_handler = notify_hidden
+
+    ui._draw_top_status()
+
+    assert checkbox_calls[0] == ("Spellbook", True)
+    assert not controller.ui_enabled
+    assert hidden_notifications == 1
+
+
 def test_desktop_ui_overlay_keyboard_finish_updates_spell(tmp_path: Path) -> None:
     from osc_grimoire.desktop_ui import DesktopVoiceUi
 

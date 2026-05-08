@@ -42,6 +42,9 @@ OVERLAY_NAME = "OSC Grimoire Spellbook"
 TRAIL_OVERLAY_KEY = "space.hiina.osc_grimoire.gesture_trail"
 TRAIL_OVERLAY_NAME = "OSC Grimoire Gesture Trail"
 APP_KEY = "space.hiina.osc_grimoire"
+SPELLBOOK_HIDDEN_NOTIFICATION_TEXT = (
+    "OSC Grimoire spellbook hidden, toggle it back on in the desktop window"
+)
 
 
 @dataclass(frozen=True)
@@ -412,6 +415,9 @@ class OpenVrOverlayRunner:
         self.app.keyboard_request_handler = self.request_spell_name_keyboard
         self.app.keyboard_close_handler = self._hide_keyboard
         self.app.bindings_request_handler = self.open_binding_ui
+        self.app.overlay_spellbook_hidden_handler = (
+            self._notify_spellbook_hidden_from_vr
+        )
 
     def run(self) -> None:
         self._init_openvr()
@@ -457,6 +463,7 @@ class OpenVrOverlayRunner:
             self.shutdown()
 
     def shutdown(self) -> None:
+        self.app.overlay_spellbook_hidden_handler = None
         self.app.controller.set_voice_recording(False)
         self.app.controller.set_gesture_drawing(False)
         self.app.controller.set_stance_casting(False)
@@ -607,6 +614,25 @@ class OpenVrOverlayRunner:
             LOGGER.exception("Could not open SteamVR binding UI")
             return False
 
+    def _notify_spellbook_hidden_from_vr(self) -> None:
+        if self.openvr is None or self.overlay_handle is None:
+            return
+        try:
+            notifications = self.openvr.VRNotifications()
+            notifications.createNotification(
+                self.overlay_handle,
+                0,
+                self.openvr.EVRNotificationType_Transient,
+                SPELLBOOK_HIDDEN_NOTIFICATION_TEXT,
+                self.openvr.EVRNotificationStyle_Application,
+                self.openvr.NotificationBitmap_t(),
+            )
+        except Exception:
+            LOGGER.debug(
+                "Could not show SteamVR spellbook hidden notification",
+                exc_info=True,
+            )
+
     def _set_keyboard_avoid_rect(self) -> None:
         assert self.openvr is not None
         assert self.vr_overlay is not None
@@ -728,7 +754,10 @@ class OpenVrOverlayRunner:
             self.trigger_down = False
             return
         if self._digital_action_pressed("ui_toggle"):
+            was_visible = self.app.controller.ui_enabled
             self.app.controller.toggle_ui_enabled()
+            if was_visible and not self.app.controller.ui_enabled:
+                self._notify_spellbook_hidden_from_vr()
         trigger_pressed = input_state.trigger_down and not self.trigger_down
         trigger_released = not input_state.trigger_down and self.trigger_down
         if not self.app.controller.voice_enabled and self.voice_trigger_down:

@@ -61,6 +61,7 @@ class DesktopVoiceUi:
         self.keyboard_close_handler: Callable[[], None] | None = None
         self.bindings_request_handler: Callable[[], bool] | None = None
         self.overlay_start_handler: Callable[[], bool] | None = None
+        self.overlay_spellbook_hidden_handler: Callable[[], None] | None = None
         self.keyboard_edit_spell_id: str | None = None
         self.keyboard_editing = False
         self.keyboard_focus_pending = False
@@ -1328,12 +1329,17 @@ class DesktopVoiceUi:
         from imgui_bundle import imgui
 
         summary = self._osc_status_summary()
-        if not self.overlay_mode:
-            ui_enabled = self.controller.ui_enabled
-            changed, ui_enabled = imgui.checkbox("Spellbook", ui_enabled)
-            if changed:
+        ui_enabled = True if self.overlay_mode else self.controller.ui_enabled
+        changed, ui_enabled = imgui.checkbox("Spellbook", ui_enabled)
+        if changed:
+            if self.overlay_mode:
+                if not ui_enabled:
+                    self.controller.set_ui_enabled(False)
+                    if self.overlay_spellbook_hidden_handler is not None:
+                        self.overlay_spellbook_hidden_handler()
+            else:
                 self.controller.set_ui_enabled(ui_enabled)
-            imgui.same_line()
+        imgui.same_line()
         voice_enabled = self.controller.voice_enabled
         changed, voice_enabled = imgui.checkbox("Voice", voice_enabled)
         if changed:
